@@ -1,0 +1,22 @@
+# Local data (never commit the 268 GB dataset)
+data/raw/
+data/cleaned/
+data/extracted/
+data/processed/
+
+# Test extraction cache
+tests/fixtures_extracted/
+
+# Reports and generated outputs
+outputs/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
