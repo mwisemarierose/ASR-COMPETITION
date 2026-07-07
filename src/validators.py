@@ -6,8 +6,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from pathlib import Path
 
-import librosa
-
+from .audio_utils import get_audio_duration
 from .config import (
     ALIGNMENT_DURATION_TOLERANCE_SEC,
     MAX_CHARS_PER_SEC,
@@ -97,10 +96,7 @@ class AudioDurationValidator(BaseValidator):
             record.audio_filename,
             record.key or None,
         )
-        try:
-            return float(librosa.get_duration(path=audio_path))
-        except Exception:
-            return None
+        return get_audio_duration(audio_path, record)
 
 
 class AlignmentValidator(BaseValidator):
@@ -142,8 +138,5 @@ class AlignmentValidator(BaseValidator):
             record.audio_filename,
             record.key or None,
         )
-        try:
-            return float(librosa.get_duration(path=audio_path))
-        except Exception:
-            return None
+        return get_audio_duration(audio_path, record)
 
