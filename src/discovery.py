@@ -7,7 +7,7 @@ import re
 from pathlib import Path
 
 from .archive_extractor import TarXzArchiveExtractor
-from .config import AUDIO_DIRNAME, DOMAINS, IMAGE_DIRNAME, MANIFEST_GLOB, SPLITS, PipelineConfig
+from .config import AUDIO_DIRNAME, DOMAINS, MANIFEST_GLOB, SPLITS, PipelineConfig
 from .models import SplitContext
 
 _SPLIT_PATTERN = re.compile(r"^(.+)_swahili_(train|dev|test)$")
@@ -61,16 +61,13 @@ class DatasetDiscovery:
         folder = self.config.split_folder_path(domain, split)
         manifests = sorted(folder.glob(MANIFEST_GLOB)) if folder.is_dir() else []
         audio_dir = folder / AUDIO_DIRNAME
-        image_dir = folder / IMAGE_DIRNAME
         return SplitContext(
             domain=domain,
             split=split,
             folder=folder,
             audio_dir=audio_dir,
-            image_dir=image_dir,
             manifest_paths=manifests,
             audio_archives=TarXzArchiveExtractor.find_archives(audio_dir),
-            image_archives=TarXzArchiveExtractor.find_archives(image_dir),
         )
 
     def planned_splits(

@@ -42,9 +42,8 @@ TIME_MASK_MAX_FRAMES = 40
 FREQ_MASK_MAX_BINS = 15
 MASK_COUNT = 2
 
-# Manifest + media layout inside each split folder (e.g. agriculture_swahili_dev/)
+# Manifest + audio layout inside each split folder (e.g. agriculture_swahili_dev/)
 AUDIO_DIRNAME = "audio"
-IMAGE_DIRNAME = "image"
 MANIFEST_GLOB = "manifest_*.jsonl"
 
 # Afrivoice stores extracted audio as hash-like .webm files, e.g. MsYzAS3P092NBPdEBTMa.webm
@@ -59,11 +58,12 @@ class PipelineConfig:
     dataset_root: Path = field(default_factory=lambda: DEFAULT_DATASET_ROOT)
     output_root: Path = field(default_factory=lambda: CLEANED_ROOT)
     extract_cache_root: Path = field(default_factory=lambda: EXTRACTED_ROOT)
+    processed_root: Path = field(default_factory=lambda: PROCESSED_ROOT)
+    features_dir: Path = field(default_factory=lambda: FEATURES_DIR)
     stats_dir: Path = field(default_factory=lambda: STATS_DIR)
     min_duration_sec: float = MIN_DURATION_SEC
     max_duration_sec: float | None = MAX_DURATION_SEC
     verify_audio: bool = True
-    verify_images: bool = False
     dry_run: bool = False
     skip_extract: bool = False
     force_extract: bool = False
@@ -75,3 +75,17 @@ class PipelineConfig:
 
     def split_folder_path(self, domain: str, split: str) -> Path:
         return self.dataset_root / self.split_folder_name(domain, split)
+
+    @classmethod
+    def with_work_dir(cls, work_dir: Path, **kwargs) -> "PipelineConfig":
+        """Place all large pipeline outputs under one directory (e.g. community storage)."""
+        work_dir = work_dir.resolve()
+        defaults = {
+            "extract_cache_root": work_dir / "extracted",
+            "output_root": work_dir / "cleaned",
+            "processed_root": work_dir / "processed",
+            "features_dir": work_dir / "features",
+            "stats_dir": work_dir / "statistics",
+        }
+        defaults.update(kwargs)
+        return cls(**defaults)

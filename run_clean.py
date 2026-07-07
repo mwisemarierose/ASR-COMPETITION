@@ -52,9 +52,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="Do not open audio files; use manifest duration instead",
     )
     parser.add_argument(
-        "--require-images",
-        action="store_true",
-        help="Drop rows with missing image prompt files",
+        "--work-dir",
+        type=Path,
+        help="Put all large outputs here (extracted, cleaned). Use project storage on HPC.",
     )
     parser.add_argument(
         "--extract-cache-root",
@@ -88,17 +88,29 @@ def main() -> int:
     if not args.skip_audio_check:
         configure_ffmpeg()
 
-    config = PipelineConfig(
-        dataset_root=args.dataset_root,
-        min_duration_sec=args.min_duration,
-        max_duration_sec=args.max_duration,
-        verify_audio=not args.skip_audio_check,
-        verify_images=args.require_images,
-        dry_run=args.dry_run,
-        skip_extract=args.skip_extract,
-        force_extract=args.force_extract,
-        max_records=args.max_records,
-    )
+    if args.work_dir:
+        config = PipelineConfig.with_work_dir(
+            args.work_dir,
+            dataset_root=args.dataset_root,
+            min_duration_sec=args.min_duration,
+            max_duration_sec=args.max_duration,
+            verify_audio=not args.skip_audio_check,
+            dry_run=args.dry_run,
+            skip_extract=args.skip_extract,
+            force_extract=args.force_extract,
+            max_records=args.max_records,
+        )
+    else:
+        config = PipelineConfig(
+            dataset_root=args.dataset_root,
+            min_duration_sec=args.min_duration,
+            max_duration_sec=args.max_duration,
+            verify_audio=not args.skip_audio_check,
+            dry_run=args.dry_run,
+            skip_extract=args.skip_extract,
+            force_extract=args.force_extract,
+            max_records=args.max_records,
+        )
     if args.output_root:
         config.output_root = args.output_root
     if args.extract_cache_root:

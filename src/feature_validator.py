@@ -10,7 +10,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from .config import FEATURES_DIR, N_MELS, PipelineConfig
+from .config import N_MELS, PipelineConfig
 
 
 class FeatureValidator:
@@ -109,11 +109,12 @@ class FeatureValidator:
         return problems
 
     def _feature_manifests(self, domain: str | None, split: str | None) -> list[Path]:
-        if not FEATURES_DIR.is_dir():
+        features_dir = self.config.features_dir
+        if not features_dir.is_dir():
             return []
 
         manifests: list[Path] = []
-        for domain_dir in sorted(FEATURES_DIR.iterdir()):
+        for domain_dir in sorted(features_dir.iterdir()):
             if not domain_dir.is_dir():
                 continue
             if domain and domain_dir.name != domain:

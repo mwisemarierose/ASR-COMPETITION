@@ -1,5 +1,5 @@
 """
-Data models for the Afrivoice cleaning pipeline.
+Data models for the Afrivoice ASR cleaning pipeline.
 """
 from __future__ import annotations
 
@@ -33,10 +33,6 @@ class AfrivoiceRecord:
         return str(self.raw.get("audio_filepath", "") or "").strip()
 
     @property
-    def image_filename(self) -> str:
-        return str(self.raw.get("image_filepath", "") or "").strip()
-
-    @property
     def manifest_duration(self) -> float | None:
         value = self.raw.get("duration")
         if value is None:
@@ -55,12 +51,9 @@ class SplitContext:
     split: str
     folder: Path
     audio_dir: Path
-    image_dir: Path
     manifest_paths: list[Path] = field(default_factory=list)
     audio_archives: list[Path] = field(default_factory=list)
-    image_archives: list[Path] = field(default_factory=list)
     extracted_audio_dir: Path | None = None
-    extracted_image_dir: Path | None = None
 
 
 @dataclass
@@ -70,7 +63,6 @@ class FilterStats:
     input_rows: int = 0
     empty_transcript: int = 0
     missing_audio: int = 0
-    missing_image: int = 0
     corrupt_audio: int = 0
     too_short: int = 0
     too_long: int = 0
@@ -83,7 +75,6 @@ class FilterStats:
             "input_rows": self.input_rows,
             "empty_transcript": self.empty_transcript,
             "missing_audio": self.missing_audio,
-            "missing_image": self.missing_image,
             "corrupt_audio": self.corrupt_audio,
             "too_short": self.too_short,
             "too_long": self.too_long,
@@ -105,13 +96,11 @@ class VerifyReport:
     missing_audio: int = 0
     empty_transcripts: int = 0
     audio_archives: list[str] = field(default_factory=list)
-    image_archives: list[str] = field(default_factory=list)
-    extraction: list[dict] = field(default_factory=list)
+    extraction: dict | None = None
     issues: list[str] = field(default_factory=list)
 
     @property
     def ok(self) -> bool:
-        # Structural problems block the run; bad rows are filtered during cleaning.
         return not self.issues
 
     def to_dict(self) -> dict[str, Any]:
@@ -124,7 +113,6 @@ class VerifyReport:
             "missing_audio": self.missing_audio,
             "empty_transcripts": self.empty_transcripts,
             "audio_archives": self.audio_archives,
-            "image_archives": self.image_archives,
             "extraction": self.extraction,
             "issues": self.issues,
             "ok": self.ok,

@@ -9,7 +9,7 @@ from typing import Any
 
 from tqdm import tqdm
 
-from .archive_extractor import TarXzArchiveExtractor
+from .archive_extractor import ExtractionReport, TarXzArchiveExtractor
 from .config import PipelineConfig
 from .discovery import DatasetDiscovery
 from .filters import RecordFilter
@@ -50,8 +50,8 @@ class AfrivoiceCleaningPipeline:
             print(f"{context.domain} / {context.split}")
             print(f"Folder: {context.folder}")
 
-            extraction_reports = self._prepare_split(context)
-            verify_report = self.verify_split(context, extraction_reports)
+            extraction_report = self._prepare_split(context)
+            verify_report = self.verify_split(context, extraction_report)
             self._print_verify(verify_report)
             if not verify_report.ok:
                 print("Aborting this split — fix raw data first.")
@@ -76,23 +76,23 @@ class AfrivoiceCleaningPipeline:
             print("\nCleaning complete.")
         return 0
 
-    def _prepare_split(self, context) -> list:
-        if not context.audio_archives and not context.image_archives:
-            return []
+    def _prepare_split(self, context) -> ExtractionReport | None:
+        if not context.audio_archives:
+            return None
 
-        print("  extracting archives...")
-        reports = self.extractor.prepare_split(context)
-        for report in reports:
+        print("  extracting audio archives...")
+        report = self.extractor.prepare_split(context)
+        if report:
             status = "cached" if report.skipped else "extracted"
             print(
-                f"    {report.media_type}: {status} "
+                f"    audio: {status} "
                 f"({len(report.archives)} archive(s), {report.extracted_files} files)"
             )
             if report.target_dir:
                 print(f"      -> {report.target_dir}")
-        return reports
+        return report
 
-    def verify_split(self, context, extraction_reports: list | None = None) -> VerifyReport:
+    def verify_split(self, context, extraction_report: ExtractionReport | None = None) -> VerifyReport:
         report = VerifyReport(
             domain=context.domain,
             split=context.split,
@@ -109,9 +109,8 @@ class AfrivoiceCleaningPipeline:
 
         report.manifests = [path.name for path in context.manifest_paths]
         report.audio_archives = [path.name for path in context.audio_archives]
-        report.image_archives = [path.name for path in context.image_archives]
-        if extraction_reports:
-            report.extraction = [item.to_dict() for item in extraction_reports]
+        if extraction_report:
+            report.extraction = extraction_report.to_dict()
         transcript_validator = TranscriptValidator()
         audio_validator = AudioFileValidator()
         loader = ManifestChunkLoader(context.manifest_paths)
@@ -173,8 +172,6 @@ class AfrivoiceCleaningPipeline:
         print(f"  manifests: {', '.join(report.manifests) or 'none'}")
         if report.audio_archives:
             print(f"  audio archives: {', '.join(report.audio_archives)}")
-        if report.image_archives:
-            print(f"  image archives: {', '.join(report.image_archives)}")
         print(f"  rows: {report.rows}")
         print(f"  empty transcripts: {report.empty_transcripts}")
         print(f"  missing audio: {report.missing_audio}")

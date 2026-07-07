@@ -13,13 +13,11 @@ import pandas as pd
 from tqdm import tqdm
 
 from .config import (
-    FEATURES_DIR,
     FREQ_MASK_MAX_BINS,
     HOP_LENGTH,
     MASK_COUNT,
     N_FFT,
     N_MELS,
-    PROCESSED_ROOT,
     SAMPLE_RATE,
     TIME_MASK_MAX_FRAMES,
     PipelineConfig,
@@ -125,9 +123,9 @@ class AfrivoiceFeaturePipeline:
         return 0
 
     def _extract_split(self, domain: str, split: str, manifest_path: Path) -> dict[str, Any]:
-        feat_dir = FEATURES_DIR / domain / split
+        feat_dir = self.config.features_dir / domain / split
         feat_dir.mkdir(parents=True, exist_ok=True)
-        out_manifest = FEATURES_DIR / domain / f"{split}_features.tsv"
+        out_manifest = self.config.features_dir / domain / f"{split}_features.tsv"
 
         rows = []
         feature_paths = []
@@ -172,7 +170,7 @@ class AfrivoiceFeaturePipeline:
 
     def _augment_train(self, domain: str, manifest_path: Path) -> dict[str, Any]:
         df = pd.read_csv(manifest_path, sep="\t")
-        aug_dir = FEATURES_DIR / domain / "train_augmented"
+        aug_dir = self.config.features_dir / domain / "train_augmented"
         aug_dir.mkdir(parents=True, exist_ok=True)
         rows = []
 
@@ -187,7 +185,7 @@ class AfrivoiceFeaturePipeline:
             item["feature_shape"] = str(list(aug.shape))
             rows.append(item)
 
-        out_manifest = FEATURES_DIR / domain / "train_augmented.tsv"
+        out_manifest = self.config.features_dir / domain / "train_augmented.tsv"
         pd.DataFrame(rows).to_csv(out_manifest, sep="\t", index=False)
 
         return {
@@ -200,10 +198,11 @@ class AfrivoiceFeaturePipeline:
 
     def _targets(self, domain: str | None, split: str | None) -> list[tuple[str, str, Path]]:
         targets: list[tuple[str, str, Path]] = []
-        if not PROCESSED_ROOT.is_dir():
+        processed_root = self.config.processed_root
+        if not processed_root.is_dir():
             return targets
 
-        for domain_dir in sorted(PROCESSED_ROOT.iterdir()):
+        for domain_dir in sorted(processed_root.iterdir()):
             if not domain_dir.is_dir():
                 continue
             dom = domain_dir.name
@@ -221,10 +220,11 @@ class AfrivoiceFeaturePipeline:
         return targets
 
     def _train_feature_manifests(self, domain: str | None) -> list[Path]:
-        if not FEATURES_DIR.is_dir():
+        features_dir = self.config.features_dir
+        if not features_dir.is_dir():
             return []
         manifests = []
-        for domain_dir in sorted(FEATURES_DIR.iterdir()):
+        for domain_dir in sorted(features_dir.iterdir()):
             if not domain_dir.is_dir():
                 continue
             if domain and domain_dir.name != domain:

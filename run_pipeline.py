@@ -33,8 +33,16 @@ STEPS = ("clean", "preprocess", "extract", "augment", "validate")
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run the full Afrivoice ASR pipeline")
     parser.add_argument("--dataset-root", type=Path, default=DEFAULT_DATASET_ROOT)
+    parser.add_argument(
+        "--work-dir",
+        type=Path,
+        help="Put all large outputs here (extracted, cleaned, processed, features). "
+        "Use community/project storage on HPC to avoid home disk quota.",
+    )
     parser.add_argument("--output-root", type=Path)
     parser.add_argument("--extract-cache-root", type=Path)
+    parser.add_argument("--processed-root", type=Path)
+    parser.add_argument("--features-dir", type=Path)
     parser.add_argument("--domain", choices=["agriculture", "education", "financial", "government", "health"])
     parser.add_argument("--split", choices=["train", "dev", "test"])
     parser.add_argument(
@@ -53,18 +61,34 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def build_config(args: argparse.Namespace) -> PipelineConfig:
-    config = PipelineConfig(
-        dataset_root=args.dataset_root,
-        verify_audio=not args.skip_audio_check,
-        verify_alignment=not args.skip_alignment_check,
-        skip_extract=args.skip_extract,
-        force_extract=args.force_extract,
-        max_records=args.max_records,
-    )
+    if args.work_dir:
+        config = PipelineConfig.with_work_dir(
+            args.work_dir,
+            dataset_root=args.dataset_root,
+            verify_audio=not args.skip_audio_check,
+            verify_alignment=not args.skip_alignment_check,
+            skip_extract=args.skip_extract,
+            force_extract=args.force_extract,
+            max_records=args.max_records,
+        )
+    else:
+        config = PipelineConfig(
+            dataset_root=args.dataset_root,
+            verify_audio=not args.skip_audio_check,
+            verify_alignment=not args.skip_alignment_check,
+            skip_extract=args.skip_extract,
+            force_extract=args.force_extract,
+            max_records=args.max_records,
+        )
+
     if args.output_root:
         config.output_root = args.output_root
     if args.extract_cache_root:
         config.extract_cache_root = args.extract_cache_root
+    if args.processed_root:
+        config.processed_root = args.processed_root
+    if args.features_dir:
+        config.features_dir = args.features_dir
     return config
 
 
@@ -82,6 +106,13 @@ def main() -> int:
             return 1
         if ffmpeg_path:
             print(f"Using ffmpeg: {ffmpeg_path}")
+
+    if args.work_dir:
+        print(f"Work directory: {args.work_dir.resolve()}")
+        print(f"  extracted: {config.extract_cache_root}")
+        print(f"  cleaned:   {config.output_root}")
+        print(f"  processed: {config.processed_root}")
+        print(f"  features:  {config.features_dir}")
 
     if "clean" in steps:
         print(f"\n{'=' * 60}\nCLEAN\n{'=' * 60}")

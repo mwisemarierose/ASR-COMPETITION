@@ -11,7 +11,7 @@ import librosa
 import soundfile as sf
 from tqdm import tqdm
 
-from .config import DEFAULT_AUDIO_EXTENSION, PROCESSED_ROOT, SAMPLE_RATE, PipelineConfig
+from .config import DEFAULT_AUDIO_EXTENSION, SAMPLE_RATE, PipelineConfig
 
 
 class AfrivoicePreprocessingPipeline:
@@ -19,7 +19,7 @@ class AfrivoicePreprocessingPipeline:
 
     def __init__(self, config: PipelineConfig) -> None:
         self.config = config
-        self.processed_root = PROCESSED_ROOT
+        self.processed_root = config.processed_root
 
     def run(self, domain: str | None = None, split: str | None = None) -> int:
         targets = self._targets(domain, split)

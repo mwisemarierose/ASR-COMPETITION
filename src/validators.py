@@ -1,5 +1,5 @@
 """
-Validators for Afrivoice records and media files.
+Validators for Afrivoice ASR records and audio files.
 """
 from __future__ import annotations
 
@@ -48,23 +48,8 @@ class AudioFileValidator(BaseValidator):
         return MediaResolver.resolve_audio(context, filename, key=key)
 
 
-class ImageFileValidator(BaseValidator):
-    """Optional validator for image prompt files."""
-
-    def validate(self, record: AfrivoiceRecord, context: SplitContext) -> tuple[bool, str | None]:
-        if not record.image_filename:
-            return False, "missing_image"
-        if self.resolve_image(context, record.image_filename).is_file():
-            return True, None
-        return False, "missing_image"
-
-    @staticmethod
-    def resolve_image(context: SplitContext, filename: str) -> Path:
-        return MediaResolver.resolve_image(context, filename)
-
-
 class AudioDurationValidator(BaseValidator):
-    """Reject corrupt, too short, or too long audio clips."""
+    """Reject corrupt or too short audio clips."""
 
     def __init__(
         self,
@@ -102,10 +87,6 @@ class AudioDurationValidator(BaseValidator):
 class AlignmentValidator(BaseValidator):
     """
     Verify transcript-audio alignment using duration and speech-rate heuristics.
-
-    Rejects rows where:
-    - manifest duration differs too much from measured audio duration
-    - transcript length vs duration implies implausible speech rate
     """
 
     def __init__(self, duration_tolerance_sec: float = ALIGNMENT_DURATION_TOLERANCE_SEC) -> None:
@@ -139,4 +120,3 @@ class AlignmentValidator(BaseValidator):
             record.key or None,
         )
         return get_audio_duration(audio_path, record)
-
