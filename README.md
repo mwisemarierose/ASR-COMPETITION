@@ -91,6 +91,53 @@ rm -rf ~/ASR-COMPETITION/data/processed
 rm -rf ~/ASR-COMPETITION/outputs
 ```
 
+### CPU time limit exceeded?
+
+If you see `CPU time limit exceeded (core dumped)` on `orchard-login-001`, you hit the **login node time limit**. `agriculture/train` has **131,000+ files** — too heavy for the login node.
+
+**Good news:** if extraction already finished, you do **not** need to re-extract.
+
+**Recovery — finish clean only (fast):**
+
+```bash
+export DATASET_ROOT=/project/community/rmwisene/datasets/Afrivoice_Swahili
+export WORK_DIR=/project/community/rmwisene/pipeline_outputs
+
+python run_pipeline.py \
+  --dataset-root $DATASET_ROOT \
+  --work-dir $WORK_DIR \
+  --domain agriculture --split train \
+  --step clean \
+  --skip-extract \
+  --skip-audio-check \
+  --skip-alignment-check
+```
+
+| Flag | Why |
+|------|-----|
+| `--skip-extract` | Extraction already done (131,247 files) |
+| `--skip-audio-check` | Don't open every `.webm` — use manifest duration |
+| `--skip-alignment-check` | Skip slow alignment checks on train |
+
+**For heavy steps (preprocess, extract), use a compute node:**
+
+```bash
+cd ~/ASR-COMPETITION
+mkdir -p logs
+git pull   # get scripts/orchard_pipeline.slurm
+
+sbatch scripts/orchard_pipeline.slurm agriculture train clean
+sbatch scripts/orchard_pipeline.slurm agriculture train preprocess
+sbatch scripts/orchard_pipeline.slurm agriculture train extract
+```
+
+Check job status:
+
+```bash
+squeue -u $USER
+tail -f logs/asr-pipeline-*.out
+```
+
 ---
 
 ## Pipeline steps
