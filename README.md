@@ -428,7 +428,7 @@ Key columns: `feature_path`, `transcript`, `feature_shape`
 ```text
 outputs/statistics/cleaning_report_<domain>.json
 outputs/statistics/preprocessing_report_<domain>.json
-outputs/statistics/feature_extraction_report.json
+outputs/statistics/feature_extraction_report_<domain>.json
 ```
 
 ---

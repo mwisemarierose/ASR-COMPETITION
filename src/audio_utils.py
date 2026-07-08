@@ -1,6 +1,7 @@
 """
 Robust audio duration probing and decoding for Afrivoice .webm files.
 """
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -73,7 +74,9 @@ def load_audio_mono(path: Path, sample_rate: int = SAMPLE_RATE) -> np.ndarray:
     return _load_audio_with_av(path, sample_rate)
 
 
-def get_audio_duration(path: Path, record: AfrivoiceRecord | None = None) -> float | None:
+def get_audio_duration(
+    path: Path, record: AfrivoiceRecord | None = None
+) -> float | None:
     """
     Return clip duration in seconds.
 

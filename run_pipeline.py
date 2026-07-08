@@ -62,7 +62,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--workers",
         type=int,
         default=1,
-        help="Parallel workers for clean and preprocess (use SLURM --cpus-per-task value)",
+        help="Parallel workers for clean, preprocess, and extract (use SLURM --cpus-per-task value)",
     )
     parser.add_argument("--max-records", type=int)
     return parser
