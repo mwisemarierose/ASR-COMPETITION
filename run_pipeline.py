@@ -6,8 +6,7 @@ Steps:
     1. clean      — remove bad rows, normalize transcripts
     2. preprocess — resample audio to 16 kHz WAV
     3. extract    — generate 80-bin log-mel spectrograms
-    4. augment    — apply time + frequency masking (train only)
-    5. validate   — verify feature files across all splits
+    4. validate   — verify feature files across all splits
 
 Usage:
     python run_pipeline.py --dataset-root /path/to/Afrivoice_Swahili
@@ -27,7 +26,7 @@ from src.features import AfrivoiceFeaturePipeline
 from src.pipeline import AfrivoiceCleaningPipeline
 from src.preprocessing import AfrivoicePreprocessingPipeline
 
-STEPS = ("clean", "preprocess", "extract", "augment", "validate")
+STEPS = ("clean", "preprocess", "extract", "validate")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -56,6 +55,17 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--skip-extract", action="store_true")
     parser.add_argument("--force-extract", action="store_true")
     parser.add_argument("--skip-alignment-check", action="store_true")
+    parser.add_argument(
+        "--skip-verify",
+        action="store_true",
+        help="Skip the pre-clean full manifest scan (faster for large train splits)",
+    )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=1,
+        help="Parallel workers for the clean step (use SLURM --cpus-per-task value)",
+    )
     parser.add_argument("--max-records", type=int)
     return parser
 
@@ -69,6 +79,8 @@ def build_config(args: argparse.Namespace) -> PipelineConfig:
             verify_alignment=not args.skip_alignment_check,
             skip_extract=args.skip_extract,
             force_extract=args.force_extract,
+            skip_verify=args.skip_verify,
+            workers=max(1, args.workers),
             max_records=args.max_records,
         )
     else:
@@ -78,6 +90,8 @@ def build_config(args: argparse.Namespace) -> PipelineConfig:
             verify_alignment=not args.skip_alignment_check,
             skip_extract=args.skip_extract,
             force_extract=args.force_extract,
+            skip_verify=args.skip_verify,
+            workers=max(1, args.workers),
             max_records=args.max_records,
         )
 
@@ -137,12 +151,6 @@ def main() -> int:
     if "extract" in steps:
         print(f"\n{'=' * 60}\nEXTRACT FEATURES\n{'=' * 60}")
         code = feature_pipeline.run_extract(domain=args.domain, split=args.split)
-        if code != 0:
-            return code
-
-    if "augment" in steps:
-        print(f"\n{'=' * 60}\nAUGMENT\n{'=' * 60}")
-        code = feature_pipeline.run_augment(domain=args.domain)
         if code != 0:
             return code
 

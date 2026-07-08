@@ -79,6 +79,17 @@ def build_parser() -> argparse.ArgumentParser:
         help="Optional upper duration limit in seconds (default: no limit)",
     )
     parser.add_argument("--max-records", type=int, help="Limit rows per split (for testing)")
+    parser.add_argument(
+        "--skip-verify",
+        action="store_true",
+        help="Skip the pre-clean full manifest scan (faster for large train splits)",
+    )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=1,
+        help="Parallel workers for cleaning (use SLURM --cpus-per-task value)",
+    )
     return parser
 
 
@@ -98,6 +109,8 @@ def main() -> int:
             dry_run=args.dry_run,
             skip_extract=args.skip_extract,
             force_extract=args.force_extract,
+            skip_verify=args.skip_verify,
+            workers=max(1, args.workers),
             max_records=args.max_records,
         )
     else:
@@ -109,6 +122,8 @@ def main() -> int:
             dry_run=args.dry_run,
             skip_extract=args.skip_extract,
             force_extract=args.force_extract,
+            skip_verify=args.skip_verify,
+            workers=max(1, args.workers),
             max_records=args.max_records,
         )
     if args.output_root:

@@ -39,6 +39,17 @@ class AudioFileValidator(BaseValidator):
     def validate(self, record: AfrivoiceRecord, context: SplitContext) -> tuple[bool, str | None]:
         if not record.audio_filename and not record.key:
             return False, "missing_audio"
+
+        if context.audio_index is not None:
+            candidates = MediaResolver._candidate_names(
+                record.audio_filename,
+                record.key or None,
+            )
+            for name in candidates:
+                if name in context.audio_index or Path(name).stem in context.audio_index:
+                    return True, None
+            return False, "missing_audio"
+
         if MediaResolver.resolve_audio_record(context, record).is_file():
             return True, None
         return False, "missing_audio"

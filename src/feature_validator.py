@@ -1,5 +1,5 @@
 """
-Step 5: validate generated log-mel features across all splits.
+Step 4: validate generated log-mel features across all splits.
 """
 from __future__ import annotations
 
@@ -31,11 +31,7 @@ class FeatureValidator:
 
         for manifest_path in manifests:
             dom = manifest_path.parent.name
-            spl = manifest_path.stem.replace("_features", "").replace("_augmented", "_augmented")
-            if manifest_path.name == "train_augmented.tsv":
-                spl = "train_augmented"
-            else:
-                spl = manifest_path.stem.replace("_features", "")
+            spl = manifest_path.stem.replace("_features", "")
 
             print(f"\nValidating features {dom}/{spl}...")
             report = self._validate_manifest(manifest_path, dom, spl)
@@ -125,10 +121,6 @@ class FeatureValidator:
                 if split and spl != split:
                     continue
                 manifests.append(manifest)
-
-            aug_manifest = domain_dir / "train_augmented.tsv"
-            if aug_manifest.is_file() and (split is None or split == "train"):
-                manifests.append(aug_manifest)
 
         return manifests
 

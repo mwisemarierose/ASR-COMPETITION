@@ -54,6 +54,7 @@ class SplitContext:
     manifest_paths: list[Path] = field(default_factory=list)
     audio_archives: list[Path] = field(default_factory=list)
     extracted_audio_dir: Path | None = None
+    audio_index: dict[str, Path] | None = None
 
 
 @dataclass

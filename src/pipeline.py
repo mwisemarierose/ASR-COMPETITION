@@ -4,17 +4,20 @@ Main OOP cleaning pipeline for DigitalUmuganda/Afrivoice_Swahili.
 from __future__ import annotations
 
 import json
+from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 from typing import Any
 
 from tqdm import tqdm
 
 from .archive_extractor import ExtractionReport, TarXzArchiveExtractor
+from .clean_workers import process_clean_batch
 from .config import PipelineConfig
 from .discovery import DatasetDiscovery
 from .filters import RecordFilter
 from .manifest_loader import ManifestChunkLoader
-from .models import FilterStats, VerifyReport
+from .media_resolver import MediaResolver
+from .models import AfrivoiceRecord, FilterStats, SplitContext, VerifyReport
 from .validators import AudioFileValidator, TranscriptValidator
 
 
@@ -51,7 +54,10 @@ class AfrivoiceCleaningPipeline:
             print(f"Folder: {context.folder}")
 
             extraction_report = self._prepare_split(context)
-            verify_report = self.verify_split(context, extraction_report)
+            if self.config.skip_verify:
+                verify_report = self._quick_verify(context, extraction_report)
+            else:
+                verify_report = self.verify_split(context, extraction_report)
             self._print_verify(verify_report)
             if not verify_report.ok:
                 print("Aborting this split — fix raw data first.")
@@ -92,6 +98,30 @@ class AfrivoiceCleaningPipeline:
                 print(f"      -> {report.target_dir}")
         return report
 
+    def _quick_verify(
+        self,
+        context: SplitContext,
+        extraction_report: ExtractionReport | None = None,
+    ) -> VerifyReport:
+        """Fast structural checks without scanning every manifest row."""
+        report = VerifyReport(
+            domain=context.domain,
+            split=context.split,
+            folder=context.folder,
+        )
+        if not context.folder.is_dir():
+            report.issues.append(f"Directory not found: {context.folder}")
+            return report
+        if not context.manifest_paths:
+            report.issues.append("No manifest_*.jsonl files found")
+            return report
+
+        report.manifests = [path.name for path in context.manifest_paths]
+        report.audio_archives = [path.name for path in context.audio_archives]
+        if extraction_report:
+            report.extraction = extraction_report.to_dict()
+        return report
+
     def verify_split(self, context, extraction_report: ExtractionReport | None = None) -> VerifyReport:
         report = VerifyReport(
             domain=context.domain,
@@ -130,7 +160,19 @@ class AfrivoiceCleaningPipeline:
 
         return report
 
-    def clean_split(self, context) -> dict[str, Any]:
+    def clean_split(self, context: SplitContext) -> dict[str, Any]:
+        self._prepare_audio_index(context)
+        if self.config.workers > 1:
+            return self._clean_split_parallel(context)
+        return self._clean_split_sequential(context)
+
+    def _prepare_audio_index(self, context: SplitContext) -> None:
+        if context.audio_index is not None:
+            return
+        context.audio_index = MediaResolver.build_audio_index(context)
+        print(f"  audio index: {len(context.audio_index)} file(s)")
+
+    def _clean_split_sequential(self, context: SplitContext) -> dict[str, Any]:
         stats = FilterStats()
         output_dir = self._output_dir(context)
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -158,7 +200,73 @@ class AfrivoiceCleaningPipeline:
             "stats": stats.to_dict(),
         }
 
-    def _output_dir(self, context) -> Path:
+    def _clean_split_parallel(self, context: SplitContext) -> dict[str, Any]:
+        records = self._load_records(context)
+        if not records:
+            raise RuntimeError(f"No manifest rows found for {context.domain}/{context.split}")
+
+        workers = min(self.config.workers, len(records))
+        chunk_size = max(1, (len(records) + workers - 1) // workers)
+        batches = [records[index : index + chunk_size] for index in range(0, len(records), chunk_size)]
+
+        print(f"  cleaning with {workers} worker(s), {len(batches)} batch(es)")
+        stats = FilterStats()
+        output_dir = self._output_dir(context)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        output_path = output_dir / "manifest_cleaned.jsonl"
+
+        batch_results: list = []
+        with ProcessPoolExecutor(max_workers=workers) as executor:
+            futures = [
+                executor.submit(process_clean_batch, batch, self.config, context)
+                for batch in batches
+            ]
+            for future in tqdm(futures, desc=f"  {context.domain}/{context.split}"):
+                batch_results.extend(future.result())
+
+        batch_results.sort(key=lambda item: item[0])
+        seen_keys: set[str] = set()
+
+        with output_path.open("w", encoding="utf-8") as handle:
+            for _, cleaned, reason in batch_results:
+                stats.input_rows += 1
+                if cleaned is not None:
+                    key = str(cleaned.get("key", ""))
+                    if key and key in seen_keys:
+                        cleaned = None
+                        reason = "duplicate_key"
+                    elif key:
+                        seen_keys.add(key)
+
+                self._bump_stat(stats, reason)
+                if cleaned is not None:
+                    handle.write(json.dumps(cleaned, ensure_ascii=False) + "\n")
+
+                if self.config.max_records and stats.input_rows >= self.config.max_records:
+                    break
+
+        return {
+            "domain": context.domain,
+            "split": context.split,
+            "output_manifest": str(output_path),
+            "stats": stats.to_dict(),
+        }
+
+    def _load_records(self, context: SplitContext) -> list[AfrivoiceRecord]:
+        records = list(ManifestChunkLoader(context.manifest_paths))
+        if self.config.max_records:
+            records = records[: self.config.max_records]
+        return records
+
+    @staticmethod
+    def _bump_stat(stats: FilterStats, reason: str | None) -> None:
+        if reason is None:
+            stats.kept += 1
+            return
+        if hasattr(stats, reason):
+            setattr(stats, reason, getattr(stats, reason) + 1)
+
+    def _output_dir(self, context: SplitContext) -> Path:
         return self.config.output_root / context.domain / context.split
 
     def _write_report(self, reports: list[dict[str, Any]]) -> None:

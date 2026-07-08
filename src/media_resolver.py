@@ -18,6 +18,26 @@ class MediaResolver:
     """Locate audio files across raw folders and extracted archives."""
 
     @staticmethod
+    def build_audio_index(context: SplitContext) -> dict[str, Path]:
+        """Index audio files once so per-row lookups avoid repeated disk walks."""
+        index: dict[str, Path] = {}
+        for directory in MediaResolver._search_dirs(context):
+            if not directory.is_dir():
+                continue
+            try:
+                entries = directory.iterdir()
+            except OSError:
+                continue
+            for path in entries:
+                if not path.is_file():
+                    continue
+                if path.suffix.lower() not in AUDIO_EXTENSIONS:
+                    continue
+                index.setdefault(path.name, path)
+                index.setdefault(path.stem, path)
+        return index
+
+    @staticmethod
     def resolve_audio(
         context: SplitContext,
         filename: str,
@@ -26,9 +46,17 @@ class MediaResolver:
         if not filename and not key:
             return context.audio_dir / "missing"
 
-        search_dirs = MediaResolver._search_dirs(context)
         candidates = MediaResolver._candidate_names(filename, key)
+        if context.audio_index:
+            for name in candidates:
+                hit = context.audio_index.get(name)
+                if hit is not None:
+                    return hit
+                hit = context.audio_index.get(Path(name).stem)
+                if hit is not None:
+                    return hit
 
+        search_dirs = MediaResolver._search_dirs(context)
         for directory in search_dirs:
             for name in candidates:
                 candidate = directory / name

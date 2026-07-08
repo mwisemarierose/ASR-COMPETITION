@@ -147,10 +147,9 @@ tail -f logs/asr-pipeline-*.out
 | 1. Clean | `--step clean` | Extract audio tar.xz, filter bad rows, normalize transcripts |
 | 2. Preprocess | `--step preprocess` | Convert `.webm` → 16 kHz mono `.wav` |
 | 3. Extract | `--step extract` | Generate 80-bin log-mel spectrograms (`.npy`) |
-| 4. Augment | `--step augment` | SpecAugment on **train** only (time + frequency masking) |
-| 5. Validate | `--step validate` | Check all `.npy` feature files |
+| 4. Validate | `--step validate` | Check all `.npy` feature files |
 
-Default (no `--step`) runs all 5 steps in order.
+Default (no `--step`) runs all 4 steps in order.
 
 ---
 
@@ -200,7 +199,6 @@ python run_pipeline.py --dataset-root $DATASET_ROOT --domain agriculture --split
 python run_pipeline.py --step clean      --dataset-root $DATASET_ROOT --domain agriculture
 python run_pipeline.py --step preprocess --domain agriculture
 python run_pipeline.py --step extract    --domain agriculture
-python run_pipeline.py --step augment    --domain agriculture
 python run_pipeline.py --step validate   --domain agriculture
 ```
 
@@ -359,7 +357,7 @@ Available splits: `train`, `dev`, `test`
 | `--features-dir` | path | `outputs/features` | Where log-mel `.npy` files are written |
 | `--domain` | choice | all | `agriculture`, `education`, `financial`, `government`, `health` |
 | `--split` | choice | all | `train`, `dev`, `test` |
-| `--step` | choice (repeatable) | all steps | `clean`, `preprocess`, `extract`, `augment`, `validate` |
+| `--step` | choice (repeatable) | all steps | `clean`, `preprocess`, `extract`, `validate` |
 | `--verify-only` | flag | off | Verify manifests only, no output |
 | `--skip-audio-check` | flag | off | Use manifest duration instead of opening `.webm` |
 | `--skip-extract` | flag | off | Use existing extracted cache only |
@@ -404,7 +402,6 @@ data/cleaned/<domain>/<split>/manifest_cleaned.jsonl
 data/processed/<domain>/<split>/audio/*.wav       # 16 kHz mono — USE FOR TRAINING
 data/processed/<domain>/<split>/manifest_processed.jsonl
 outputs/features/<domain>/<split>/*.npy           # 80-bin log-mel — USE FOR TRAINING
-outputs/features/<domain>/train_augmented/        # augmented train copies
 outputs/statistics/*.json                         # reports only (not for training)
 ```
 
@@ -425,7 +422,6 @@ Key columns: `audio_path`, `transcript`
 outputs/features/agriculture/train_features.tsv
 outputs/features/agriculture/dev_features.tsv
 outputs/features/agriculture/test_features.tsv
-outputs/features/agriculture/train_augmented.tsv
 ```
 
 Key columns: `feature_path`, `transcript`, `feature_shape`
@@ -436,7 +432,6 @@ Key columns: `feature_path`, `transcript`, `feature_shape`
 outputs/statistics/cleaning_report.json
 outputs/statistics/preprocessing_report.json
 outputs/statistics/feature_extraction_report.json
-outputs/statistics/augmentation_report.json
 outputs/statistics/feature_validation_report.json
 ```
 
@@ -517,5 +512,3 @@ print(d.list_available_splits())
 | Generate log-mel spectrogram features | extract |
 | Configure 80 features per frame | extract |
 | Validate feature generation | validate |
-| Apply time masking | augment |
-| Apply frequency masking | augment |

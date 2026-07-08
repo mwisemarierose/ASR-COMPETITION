@@ -37,11 +37,6 @@ N_MELS = 80
 N_FFT = 400
 HOP_LENGTH = 160
 
-# SpecAugment (requirement: time + frequency masking)
-TIME_MASK_MAX_FRAMES = 40
-FREQ_MASK_MAX_BINS = 15
-MASK_COUNT = 2
-
 # Manifest + audio layout inside each split folder (e.g. agriculture_swahili_dev/)
 AUDIO_DIRNAME = "audio"
 MANIFEST_GLOB = "manifest_*.jsonl"
@@ -68,6 +63,8 @@ class PipelineConfig:
     skip_extract: bool = False
     force_extract: bool = False
     verify_alignment: bool = True
+    skip_verify: bool = False
+    workers: int = 1
     max_records: int | None = None
 
     def split_folder_name(self, domain: str, split: str) -> str:

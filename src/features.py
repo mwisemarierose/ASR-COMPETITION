@@ -1,5 +1,5 @@
 """
-Step 3 & 4: extract 80-bin log-mel features and apply SpecAugment masking.
+Step 3: extract 80-bin log-mel features from preprocessed audio.
 """
 from __future__ import annotations
 
@@ -12,16 +12,7 @@ import numpy as np
 import pandas as pd
 from tqdm import tqdm
 
-from .config import (
-    FREQ_MASK_MAX_BINS,
-    HOP_LENGTH,
-    MASK_COUNT,
-    N_FFT,
-    N_MELS,
-    SAMPLE_RATE,
-    TIME_MASK_MAX_FRAMES,
-    PipelineConfig,
-)
+from .config import HOP_LENGTH, N_FFT, N_MELS, SAMPLE_RATE, PipelineConfig
 
 
 class LogMelFeatureExtractor:
@@ -45,48 +36,12 @@ class LogMelFeatureExtractor:
         return librosa.power_to_db(mel, ref=np.max)
 
 
-class SpecAugmenter:
-    """Apply time and frequency masking to log-mel features."""
-
-    def __init__(
-        self,
-        time_mask_max: int = TIME_MASK_MAX_FRAMES,
-        freq_mask_max: int = FREQ_MASK_MAX_BINS,
-        mask_count: int = MASK_COUNT,
-        seed: int = 42,
-    ) -> None:
-        self.time_mask_max = time_mask_max
-        self.freq_mask_max = freq_mask_max
-        self.mask_count = mask_count
-        self.seed = seed
-        self._rng = np.random.default_rng(seed)
-
-    def augment(self, mel: np.ndarray) -> np.ndarray:
-        out = mel.copy()
-        out = self._mask_axis(out, axis=1, max_width=self.time_mask_max)
-        out = self._mask_axis(out, axis=0, max_width=self.freq_mask_max)
-        return out
-
-    def _mask_axis(self, mel: np.ndarray, axis: int, max_width: int) -> np.ndarray:
-        out = mel.copy()
-        size = out.shape[axis]
-        fill_value = out.mean()
-        for _ in range(self.mask_count):
-            width = int(self._rng.integers(1, min(max_width, size) + 1))
-            start = int(self._rng.integers(0, max(1, size - width)))
-            slices = [slice(None), slice(None)]
-            slices[axis] = slice(start, start + width)
-            out[tuple(slices)] = fill_value
-        return out
-
-
 class AfrivoiceFeaturePipeline:
-    """Extract and optionally augment log-mel features for all processed splits."""
+    """Extract log-mel features for all processed splits."""
 
     def __init__(self, config: PipelineConfig) -> None:
         self.config = config
         self.extractor = LogMelFeatureExtractor()
-        self.augmenter = SpecAugmenter()
 
     def run_extract(self, domain: str | None = None, split: str | None = None) -> int:
         targets = self._targets(domain, split)
@@ -103,23 +58,6 @@ class AfrivoiceFeaturePipeline:
 
         self._write_report("feature_extraction_report.json", reports)
         print("\nFeature extraction complete.")
-        return 0
-
-    def run_augment(self, domain: str | None = None) -> int:
-        reports: list[dict[str, Any]] = []
-        for manifest_path in self._train_feature_manifests(domain):
-            dom = manifest_path.parent.name
-            print(f"\nAugmenting train features {dom}...")
-            report = self._augment_train(dom, manifest_path)
-            reports.append(report)
-            print(f"  augmented: {report['augmented']}")
-
-        if not reports:
-            print("No train feature manifests found — skipping augmentation.")
-            return 0
-
-        self._write_report("augmentation_report.json", reports)
-        print("\nAugmentation complete.")
         return 0
 
     def _extract_split(self, domain: str, split: str, manifest_path: Path) -> dict[str, Any]:
@@ -168,34 +106,6 @@ class AfrivoiceFeaturePipeline:
             "output_manifest": str(out_manifest),
         }
 
-    def _augment_train(self, domain: str, manifest_path: Path) -> dict[str, Any]:
-        df = pd.read_csv(manifest_path, sep="\t")
-        aug_dir = self.config.features_dir / domain / "train_augmented"
-        aug_dir.mkdir(parents=True, exist_ok=True)
-        rows = []
-
-        for index, row in tqdm(df.iterrows(), total=len(df), desc="  augment"):
-            mel = np.load(row["feature_path"])
-            aug = self.augmenter.augment(mel)
-            out_path = aug_dir / f"{Path(row['feature_path']).stem}_aug0.npy"
-            np.save(out_path, aug)
-
-            item = row.to_dict()
-            item["feature_path"] = str(out_path.resolve())
-            item["feature_shape"] = str(list(aug.shape))
-            rows.append(item)
-
-        out_manifest = self.config.features_dir / domain / "train_augmented.tsv"
-        pd.DataFrame(rows).to_csv(out_manifest, sep="\t", index=False)
-
-        return {
-            "domain": domain,
-            "augmented": len(rows),
-            "time_mask_max_frames": TIME_MASK_MAX_FRAMES,
-            "freq_mask_max_bins": FREQ_MASK_MAX_BINS,
-            "output_manifest": str(out_manifest),
-        }
-
     def _targets(self, domain: str | None, split: str | None) -> list[tuple[str, str, Path]]:
         targets: list[tuple[str, str, Path]] = []
         processed_root = self.config.processed_root
@@ -218,21 +128,6 @@ class AfrivoiceFeaturePipeline:
                 if manifest.is_file():
                     targets.append((dom, spl, manifest))
         return targets
-
-    def _train_feature_manifests(self, domain: str | None) -> list[Path]:
-        features_dir = self.config.features_dir
-        if not features_dir.is_dir():
-            return []
-        manifests = []
-        for domain_dir in sorted(features_dir.iterdir()):
-            if not domain_dir.is_dir():
-                continue
-            if domain and domain_dir.name != domain:
-                continue
-            manifest = domain_dir / "train_features.tsv"
-            if manifest.is_file():
-                manifests.append(manifest)
-        return manifests
 
     def _write_report(self, filename: str, reports: list[dict[str, Any]]) -> None:
         self.config.stats_dir.mkdir(parents=True, exist_ok=True)

@@ -17,7 +17,7 @@
 # Arguments:
 #   $1 = domain   (agriculture, education, financial, government, health)
 #   $2 = split      (train, dev, test) — optional
-#   $3 = step       (clean, preprocess, extract, augment, validate) — optional
+#   $3 = step       (clean, preprocess, extract, validate) — optional
 
 set -euo pipefail
 
@@ -51,7 +51,11 @@ fi
 
 # train splits are huge — skip per-file audio probes during clean (use manifest duration)
 if [[ "$SPLIT" == "train" || -z "$SPLIT" ]]; then
-  CMD+=(--skip-audio-check --skip-alignment-check)
+  CMD+=(--skip-audio-check --skip-alignment-check --skip-verify)
+fi
+
+if [[ -n "${SLURM_CPUS_PER_TASK:-}" && "${SLURM_CPUS_PER_TASK}" -gt 1 ]]; then
+  CMD+=(--workers "$SLURM_CPUS_PER_TASK")
 fi
 
 # reuse extracted tar.xz if already unpacked
