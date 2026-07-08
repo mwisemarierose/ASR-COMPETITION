@@ -8,10 +8,10 @@ from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 from typing import Any
 
-import librosa
 import soundfile as sf
 from tqdm import tqdm
 
+from .audio_utils import load_audio_mono
 from .config import DEFAULT_AUDIO_EXTENSION, SAMPLE_RATE, PipelineConfig
 
 PreprocessResult = tuple[int, dict[str, Any] | None]
@@ -25,7 +25,7 @@ def _process_preprocess_row(row: dict[str, Any], out_audio_dir: Path) -> dict[st
 
     dst = out_audio_dir / f"{row.get('key', src.stem)}.wav"
     try:
-        audio, _ = librosa.load(src, sr=SAMPLE_RATE, mono=True)
+        audio = load_audio_mono(src, sample_rate=SAMPLE_RATE)
     except Exception as exc:
         raise RuntimeError(
             f"Cannot read audio {src}. For .webm files install ffmpeg: {exc}"
