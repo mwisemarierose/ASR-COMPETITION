@@ -11,7 +11,6 @@ from typing import Any
 from tqdm import tqdm
 
 from .archive_extractor import ExtractionReport, TarXzArchiveExtractor
-from .clean_workers import process_clean_batch
 from .config import PipelineConfig
 from .discovery import DatasetDiscovery
 from .filters import RecordFilter
@@ -19,6 +18,24 @@ from .manifest_loader import ManifestChunkLoader
 from .media_resolver import MediaResolver
 from .models import AfrivoiceRecord, FilterStats, SplitContext, VerifyReport
 from .validators import AudioFileValidator, TranscriptValidator
+
+CleanSortKey = tuple[str, int]
+CleanResult = tuple[CleanSortKey, dict[str, Any] | None, str | None]
+
+
+def _process_clean_batch(
+    batch: list[AfrivoiceRecord],
+    config: PipelineConfig,
+    context: SplitContext,
+) -> list[CleanResult]:
+    """Filter and normalize a batch of manifest rows (no duplicate-key dedup)."""
+    record_filter = RecordFilter(config)
+    results: list[CleanResult] = []
+    for record in batch:
+        cleaned, reason = record_filter.process(record, context)
+        sort_key = (str(record.source_manifest), record.line_number)
+        results.append((sort_key, cleaned, reason))
+    return results
 
 
 class AfrivoiceCleaningPipeline:
@@ -241,7 +258,7 @@ class AfrivoiceCleaningPipeline:
         batch_results: list = []
         with ProcessPoolExecutor(max_workers=workers) as executor:
             futures = [
-                executor.submit(process_clean_batch, batch, self.config, context)
+                executor.submit(_process_clean_batch, batch, self.config, context)
                 for batch in batches
             ]
             for future in tqdm(futures, desc=f"  {context.domain}/{context.split}"):

@@ -6,7 +6,6 @@ Steps:
     1. clean      — remove bad rows, normalize transcripts
     2. preprocess — resample audio to 16 kHz WAV
     3. extract    — generate 80-bin log-mel spectrograms
-    4. validate   — verify feature files across all splits
 
 Usage:
     python run_pipeline.py --dataset-root /path/to/Afrivoice_Swahili
@@ -21,12 +20,11 @@ from pathlib import Path
 
 from src.config import DEFAULT_DATASET_ROOT, PipelineConfig
 from src.ffmpeg_setup import configure_ffmpeg, ffmpeg_status
-from src.feature_validator import FeatureValidator
 from src.features import AfrivoiceFeaturePipeline
 from src.pipeline import AfrivoiceCleaningPipeline
 from src.preprocessing import AfrivoicePreprocessingPipeline
 
-STEPS = ("clean", "preprocess", "extract", "validate")
+STEPS = ("clean", "preprocess", "extract")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -64,7 +62,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--workers",
         type=int,
         default=1,
-        help="Parallel workers for the clean step (use SLURM --cpus-per-task value)",
+        help="Parallel workers for clean and preprocess (use SLURM --cpus-per-task value)",
     )
     parser.add_argument("--max-records", type=int)
     return parser
@@ -146,17 +144,9 @@ def main() -> int:
         if code != 0:
             return code
 
-    feature_pipeline = AfrivoiceFeaturePipeline(config)
-
     if "extract" in steps:
         print(f"\n{'=' * 60}\nEXTRACT FEATURES\n{'=' * 60}")
-        code = feature_pipeline.run_extract(domain=args.domain, split=args.split)
-        if code != 0:
-            return code
-
-    if "validate" in steps:
-        print(f"\n{'=' * 60}\nVALIDATE FEATURES\n{'=' * 60}")
-        code = FeatureValidator(config).run(domain=args.domain, split=args.split)
+        code = AfrivoiceFeaturePipeline(config).run_extract(domain=args.domain, split=args.split)
         if code != 0:
             return code
 

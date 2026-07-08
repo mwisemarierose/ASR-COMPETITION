@@ -3,8 +3,8 @@
 #SBATCH --output=logs/asr-pipeline-%j.out
 #SBATCH --error=logs/asr-pipeline-%j.err
 #SBATCH --time=24:00:00
-#SBATCH --cpus-per-task=4
-#SBATCH --mem=16G
+#SBATCH --cpus-per-task=8
+#SBATCH --mem=32G
 
 # Orchard / SLURM: run the pipeline on a compute node, not the login node.
 #
@@ -17,7 +17,7 @@
 # Arguments:
 #   $1 = domain   (agriculture, education, financial, government, health)
 #   $2 = split      (train, dev, test) — optional
-#   $3 = step       (clean, preprocess, extract, validate) — optional
+#   $3 = step       (clean, preprocess, extract) — optional
 
 set -euo pipefail
 

@@ -147,9 +147,8 @@ tail -f logs/asr-pipeline-*.out
 | 1. Clean | `--step clean` | Extract audio tar.xz, filter bad rows, normalize transcripts |
 | 2. Preprocess | `--step preprocess` | Convert `.webm` → 16 kHz mono `.wav` |
 | 3. Extract | `--step extract` | Generate 80-bin log-mel spectrograms (`.npy`) |
-| 4. Validate | `--step validate` | Check all `.npy` feature files |
 
-Default (no `--step`) runs all 4 steps in order.
+Default (no `--step`) runs all 3 steps in order.
 
 ---
 
@@ -199,7 +198,6 @@ python run_pipeline.py --dataset-root $DATASET_ROOT --domain agriculture --split
 python run_pipeline.py --step clean      --dataset-root $DATASET_ROOT --domain agriculture
 python run_pipeline.py --step preprocess --domain agriculture
 python run_pipeline.py --step extract    --domain agriculture
-python run_pipeline.py --step validate   --domain agriculture
 ```
 
 ### Step by step — one split
@@ -208,7 +206,6 @@ python run_pipeline.py --step validate   --domain agriculture
 python run_pipeline.py --step clean      --dataset-root $DATASET_ROOT --domain agriculture --split dev
 python run_pipeline.py --step preprocess --domain agriculture --split dev
 python run_pipeline.py --step extract    --domain agriculture --split dev
-python run_pipeline.py --step validate   --domain agriculture --split dev
 ```
 
 ### Multiple steps at once
@@ -357,7 +354,7 @@ Available splits: `train`, `dev`, `test`
 | `--features-dir` | path | `outputs/features` | Where log-mel `.npy` files are written |
 | `--domain` | choice | all | `agriculture`, `education`, `financial`, `government`, `health` |
 | `--split` | choice | all | `train`, `dev`, `test` |
-| `--step` | choice (repeatable) | all steps | `clean`, `preprocess`, `extract`, `validate` |
+| `--step` | choice (repeatable) | all steps | `clean`, `preprocess`, `extract` |
 | `--verify-only` | flag | off | Verify manifests only, no output |
 | `--skip-audio-check` | flag | off | Use manifest duration instead of opening `.webm` |
 | `--skip-extract` | flag | off | Use existing extracted cache only |
@@ -430,9 +427,8 @@ Key columns: `feature_path`, `transcript`, `feature_shape`
 
 ```text
 outputs/statistics/cleaning_report_<domain>.json
-outputs/statistics/preprocessing_report.json
+outputs/statistics/preprocessing_report_<domain>.json
 outputs/statistics/feature_extraction_report.json
-outputs/statistics/feature_validation_report.json
 ```
 
 ---
@@ -511,4 +507,3 @@ print(d.list_available_splits())
 | Standardize transcript formatting | clean |
 | Generate log-mel spectrogram features | extract |
 | Configure 80 features per frame | extract |
-| Validate feature generation | validate |
