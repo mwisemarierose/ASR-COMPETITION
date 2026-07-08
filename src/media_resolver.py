@@ -24,17 +24,16 @@ class MediaResolver:
         for directory in MediaResolver._search_dirs(context):
             if not directory.is_dir():
                 continue
-            try:
-                entries = directory.iterdir()
-            except OSError:
-                continue
-            for path in entries:
-                if not path.is_file():
+            for ext in AUDIO_EXTENSIONS:
+                try:
+                    paths = directory.rglob(f"*{ext}")
+                except OSError:
                     continue
-                if path.suffix.lower() not in AUDIO_EXTENSIONS:
-                    continue
-                index.setdefault(path.name, path)
-                index.setdefault(path.stem, path)
+                for path in paths:
+                    if not path.is_file():
+                        continue
+                    index.setdefault(path.name, path)
+                    index.setdefault(path.stem, path)
         return index
 
     @staticmethod

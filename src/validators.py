@@ -40,7 +40,7 @@ class AudioFileValidator(BaseValidator):
         if not record.audio_filename and not record.key:
             return False, "missing_audio"
 
-        if context.audio_index is not None:
+        if context.audio_index:
             candidates = MediaResolver._candidate_names(
                 record.audio_filename,
                 record.key or None,
@@ -48,7 +48,6 @@ class AudioFileValidator(BaseValidator):
             for name in candidates:
                 if name in context.audio_index or Path(name).stem in context.audio_index:
                     return True, None
-            return False, "missing_audio"
 
         if MediaResolver.resolve_audio_record(context, record).is_file():
             return True, None

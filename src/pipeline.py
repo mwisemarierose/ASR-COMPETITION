@@ -67,7 +67,7 @@ class AfrivoiceCleaningPipeline:
             if verify_only or self.config.dry_run:
                 continue
 
-            clean_report = self.clean_split(context)
+            clean_report = self.clean_split(context, extraction_report)
             reports[-1]["clean"] = clean_report
             self._print_clean(clean_report)
 
@@ -160,17 +160,40 @@ class AfrivoiceCleaningPipeline:
 
         return report
 
-    def clean_split(self, context: SplitContext) -> dict[str, Any]:
-        self._prepare_audio_index(context)
+    def clean_split(self, context: SplitContext, extraction_report: ExtractionReport | None = None) -> dict[str, Any]:
+        self._prepare_audio_index(context, extraction_report)
         if self.config.workers > 1:
             return self._clean_split_parallel(context)
         return self._clean_split_sequential(context)
 
-    def _prepare_audio_index(self, context: SplitContext) -> None:
+    def _prepare_audio_index(
+        self,
+        context: SplitContext,
+        extraction_report: ExtractionReport | None = None,
+    ) -> None:
         if context.audio_index is not None:
             return
         context.audio_index = MediaResolver.build_audio_index(context)
-        print(f"  audio index: {len(context.audio_index)} file(s)")
+        indexed_files = len({path.resolve() for path in context.audio_index.values()})
+        print(f"  audio index: {indexed_files} file(s)")
+
+        expected = extraction_report.extracted_files if extraction_report else 0
+        if indexed_files == 0:
+            context.audio_index = None
+            search_dirs = MediaResolver._search_dirs(context)
+            print("  ! warning: audio index is empty — falling back to per-file lookup")
+            for directory in search_dirs:
+                print(f"    search dir: {directory} (exists={directory.is_dir()})")
+            if expected:
+                print(
+                    f"    cache marker reports {expected} extracted file(s) — "
+                    "re-run without --skip-extract if the cache directory is empty"
+                )
+        elif expected and indexed_files < expected * 0.9:
+            print(
+                f"  ! warning: indexed {indexed_files} file(s) but cache marker "
+                f"reports {expected} — cache may be incomplete"
+            )
 
     def _clean_split_sequential(self, context: SplitContext) -> dict[str, Any]:
         stats = FilterStats()
