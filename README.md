@@ -429,7 +429,7 @@ Key columns: `feature_path`, `transcript`, `feature_shape`
 ### Reports (inspection only)
 
 ```text
-outputs/statistics/cleaning_report.json
+outputs/statistics/cleaning_report_<domain>.json
 outputs/statistics/preprocessing_report.json
 outputs/statistics/feature_extraction_report.json
 outputs/statistics/feature_validation_report.json

@@ -294,9 +294,24 @@ class AfrivoiceCleaningPipeline:
 
     def _write_report(self, reports: list[dict[str, Any]]) -> None:
         self.config.stats_dir.mkdir(parents=True, exist_ok=True)
-        path = self.config.stats_dir / "cleaning_report.json"
-        path.write_text(json.dumps(reports, indent=2), encoding="utf-8")
-        print(f"\nSaved report: {path}")
+        by_domain: dict[str, list[dict[str, Any]]] = {}
+        for report in reports:
+            domain = (
+                report.get("clean", {}).get("domain")
+                or report.get("verify", {}).get("domain")
+            )
+            if not domain:
+                continue
+            by_domain.setdefault(domain, []).append(report)
+
+        saved_paths: list[Path] = []
+        for domain, domain_reports in sorted(by_domain.items()):
+            path = self.config.stats_dir / f"cleaning_report_{domain}.json"
+            path.write_text(json.dumps(domain_reports, indent=2), encoding="utf-8")
+            saved_paths.append(path)
+
+        joined = ", ".join(str(path) for path in saved_paths)
+        print(f"\nSaved report(s): {joined}")
 
     @staticmethod
     def _print_verify(report: VerifyReport) -> None:
