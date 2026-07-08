@@ -4,7 +4,7 @@ Step 2: preprocess cleaned manifests to 16 kHz mono WAV.
 from __future__ import annotations
 
 import json
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
 
@@ -14,30 +14,38 @@ from tqdm import tqdm
 from .audio_utils import load_audio_mono
 from .config import DEFAULT_AUDIO_EXTENSION, SAMPLE_RATE, PipelineConfig
 
-PreprocessResult = tuple[int, dict[str, Any] | None]
+PreprocessResult = tuple[int, dict[str, Any] | None, str | None]
+
+# Keep batches small so progress updates frequently on large train splits.
+CLIPS_PER_BATCH = 250
 
 
-def _process_preprocess_row(row: dict[str, Any], out_audio_dir: Path) -> dict[str, Any] | None:
-    """Convert one cleaned manifest row to a 16 kHz WAV file."""
-    src = Path(row["audio_path"])
-    if not src.is_file():
-        return None
-
-    dst = out_audio_dir / f"{row.get('key', src.stem)}.wav"
-    try:
-        audio = load_audio_mono(src, sample_rate=SAMPLE_RATE)
-    except Exception as exc:
-        raise RuntimeError(
-            f"Cannot read audio {src}. For .webm files install ffmpeg: {exc}"
-        ) from exc
-    sf.write(dst, audio, SAMPLE_RATE)
-
+def _build_processed_row(row: dict[str, Any], src: Path, dst: Path) -> dict[str, Any]:
     processed = dict(row)
     processed["source_audio_path"] = str(src.resolve())
     processed["source_audio_format"] = src.suffix.lower() or DEFAULT_AUDIO_EXTENSION
     processed["audio_path"] = str(dst.resolve())
     processed["sample_rate"] = SAMPLE_RATE
     return processed
+
+
+def _process_preprocess_row(row: dict[str, Any], out_audio_dir: Path) -> tuple[dict[str, Any] | None, str | None]:
+    """Convert one cleaned manifest row to a 16 kHz WAV file."""
+    src = Path(row["audio_path"])
+    if not src.is_file():
+        return None, "missing_audio"
+
+    dst = out_audio_dir / f"{row.get('key', src.stem)}.wav"
+    if dst.is_file() and dst.stat().st_size > 0:
+        return _build_processed_row(row, src, dst), "resumed"
+
+    try:
+        audio = load_audio_mono(src, sample_rate=SAMPLE_RATE)
+        sf.write(dst, audio, SAMPLE_RATE)
+    except Exception:
+        return None, "corrupt_audio"
+
+    return _build_processed_row(row, src, dst), None
 
 
 def _process_preprocess_batch(
@@ -49,8 +57,8 @@ def _process_preprocess_batch(
     out_dir.mkdir(parents=True, exist_ok=True)
     results: list[PreprocessResult] = []
     for index, row in batch:
-        processed = _process_preprocess_row(row, out_dir)
-        results.append((index, processed))
+        processed, skip_reason = _process_preprocess_row(row, out_dir)
+        results.append((index, processed, skip_reason))
     return results
 
 
@@ -72,7 +80,11 @@ class AfrivoicePreprocessingPipeline:
             print(f"\nPreprocessing {dom}/{spl}...")
             report = self._process_split(dom, spl, manifest_path)
             reports.append(report)
-            print(f"  processed: {report['processed']}/{report['input']} clips")
+            print(
+                f"  processed: {report['processed']}/{report['input']} clips "
+                f"(missing={report['missing_audio']}, corrupt={report['corrupt_audio']}, "
+                f"resumed={report['resumed']})"
+            )
 
         self._write_report(reports)
         print("\nPreprocessing complete.")
@@ -92,13 +104,16 @@ class AfrivoicePreprocessingPipeline:
                 "split": split,
                 "input": 0,
                 "processed": 0,
+                "missing_audio": 0,
+                "corrupt_audio": 0,
+                "resumed": 0,
                 "output_manifest": str(out_manifest),
             }
 
         if self.config.workers > 1:
-            rows = self._process_split_parallel(domain, split, indexed_rows, out_audio_dir)
+            rows, stats = self._process_split_parallel(domain, split, indexed_rows, out_audio_dir)
         else:
-            rows = self._process_split_sequential(indexed_rows, out_audio_dir)
+            rows, stats = self._process_split_sequential(indexed_rows, out_audio_dir)
 
         self._write_manifest(out_manifest, rows)
         return {
@@ -106,20 +121,42 @@ class AfrivoicePreprocessingPipeline:
             "split": split,
             "input": len(indexed_rows),
             "processed": len(rows),
+            "missing_audio": stats["missing_audio"],
+            "corrupt_audio": stats["corrupt_audio"],
+            "resumed": stats["resumed"],
             "output_manifest": str(out_manifest),
         }
+
+    @staticmethod
+    def _collect_results(
+        batch_results: list[PreprocessResult],
+    ) -> tuple[list[dict[str, Any]], dict[str, int]]:
+        stats = {"missing_audio": 0, "corrupt_audio": 0, "resumed": 0}
+        rows: list[dict[str, Any]] = []
+
+        for _, processed, skip_reason in sorted(batch_results, key=lambda item: item[0]):
+            if processed is not None:
+                rows.append(processed)
+                if skip_reason == "resumed":
+                    stats["resumed"] += 1
+                continue
+            if skip_reason == "missing_audio":
+                stats["missing_audio"] += 1
+            elif skip_reason == "corrupt_audio":
+                stats["corrupt_audio"] += 1
+
+        return rows, stats
 
     def _process_split_sequential(
         self,
         indexed_rows: list[tuple[int, dict[str, Any]]],
         out_audio_dir: Path,
-    ) -> list[dict[str, Any]]:
-        rows: list[dict[str, Any]] = []
-        for _, row in tqdm(indexed_rows, desc="  preprocess"):
-            processed = _process_preprocess_row(row, out_audio_dir)
-            if processed is not None:
-                rows.append(processed)
-        return rows
+    ) -> tuple[list[dict[str, Any]], dict[str, int]]:
+        batch_results: list[PreprocessResult] = []
+        for index, row in tqdm(indexed_rows, desc="  preprocess"):
+            processed, skip_reason = _process_preprocess_row(row, out_audio_dir)
+            batch_results.append((index, processed, skip_reason))
+        return self._collect_results(batch_results)
 
     def _process_split_parallel(
         self,
@@ -127,26 +164,34 @@ class AfrivoicePreprocessingPipeline:
         split: str,
         indexed_rows: list[tuple[int, dict[str, Any]]],
         out_audio_dir: Path,
-    ) -> list[dict[str, Any]]:
+    ) -> tuple[list[dict[str, Any]], dict[str, int]]:
         workers = min(self.config.workers, len(indexed_rows))
-        chunk_size = max(1, (len(indexed_rows) + workers - 1) // workers)
+        target_batches = max(workers * 8, (len(indexed_rows) + CLIPS_PER_BATCH - 1) // CLIPS_PER_BATCH)
+        chunk_size = max(1, (len(indexed_rows) + target_batches - 1) // target_batches)
         batches = [
             indexed_rows[index : index + chunk_size]
             for index in range(0, len(indexed_rows), chunk_size)
         ]
 
-        print(f"  preprocessing with {workers} worker(s), {len(batches)} batch(es)")
-        batch_results: list[tuple[int, dict[str, Any] | None]] = []
+        print(
+            f"  preprocessing with {workers} worker(s), "
+            f"{len(indexed_rows)} clips, ~{chunk_size} clips/batch"
+        )
+        batch_results: list[PreprocessResult] = []
         with ProcessPoolExecutor(max_workers=workers) as executor:
-            futures = [
-                executor.submit(_process_preprocess_batch, batch, str(out_audio_dir))
+            future_to_size = {
+                executor.submit(_process_preprocess_batch, batch, str(out_audio_dir)): len(batch)
                 for batch in batches
-            ]
-            for future in tqdm(futures, desc=f"  {domain}/{split}"):
-                batch_results.extend(future.result())
+            }
+            with tqdm(total=len(indexed_rows), desc=f"  {domain}/{split}") as progress:
+                for future in as_completed(future_to_size):
+                    try:
+                        batch_results.extend(future.result())
+                    except Exception as exc:
+                        print(f"  ! worker batch failed: {exc}")
+                    progress.update(future_to_size[future])
 
-        batch_results.sort(key=lambda item: item[0])
-        return [row for _, row in batch_results if row is not None]
+        return self._collect_results(batch_results)
 
     def _load_rows(self, manifest_path: Path) -> list[tuple[int, dict[str, Any]]]:
         rows: list[tuple[int, dict[str, Any]]] = []
