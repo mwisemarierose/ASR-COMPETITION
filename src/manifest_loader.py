@@ -4,12 +4,15 @@ Stream manifest JSONL files and load Anv-ke CSV metadata.
 from __future__ import annotations
 
 import csv
+import io
 import json
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
 from .models import AfrivoiceRecord
+
+_CSV_ENCODINGS = ("utf-8-sig", "utf-8", "latin-1", "cp1252")
 
 
 def _iter_manifest_objects(manifest_path: Path):
@@ -76,30 +79,44 @@ def _csv_row_lookup_key(row: dict[str, str]) -> str | None:
     return None
 
 
+def _decode_csv_text(path: Path) -> tuple[str, str]:
+    """Decode a CSV file, trying common encodings used in Anv-ke exports."""
+    raw_bytes = path.read_bytes()
+    for encoding in _CSV_ENCODINGS:
+        try:
+            return raw_bytes.decode(encoding), encoding
+        except UnicodeDecodeError:
+            continue
+    return raw_bytes.decode("utf-8", errors="replace"), "utf-8-replace"
+
+
 def load_csv_table(path: Path) -> dict[str, dict[str, str]]:
     """Load meta.csv or transcripts.csv keyed by recorder_uuid / mediaPathId."""
     if not path.is_file():
         return {}
 
-    with path.open(encoding="utf-8", newline="") as handle:
-        reader = csv.DictReader(handle)
-        if not reader.fieldnames:
-            return {}
+    text, encoding = _decode_csv_text(path)
+    if encoding != "utf-8" and encoding != "utf-8-sig":
+        print(f"  note: read {path.name} as {encoding}")
 
-        table: dict[str, dict[str, str]] = {}
-        for raw_row in reader:
-            row: dict[str, str] = {}
-            for key, value in raw_row.items():
-                if key is None:
-                    continue
-                norm_key = _normalize_csv_key(key)
-                if not norm_key:
-                    continue
-                row[norm_key] = _csv_cell_value(value)
-            lookup = _csv_row_lookup_key(row)
-            if lookup:
-                table[lookup] = row
-        return table
+    reader = csv.DictReader(io.StringIO(text, newline=""))
+    if not reader.fieldnames:
+        return {}
+
+    table: dict[str, dict[str, str]] = {}
+    for raw_row in reader:
+        row: dict[str, str] = {}
+        for key, value in raw_row.items():
+            if key is None:
+                continue
+            norm_key = _normalize_csv_key(key)
+            if not norm_key:
+                continue
+            row[norm_key] = _csv_cell_value(value)
+        lookup = _csv_row_lookup_key(row)
+        if lookup:
+            table[lookup] = row
+    return table
 
 
 def merge_meta_tables(
@@ -110,7 +127,12 @@ def merge_meta_tables(
     for path in (meta_csv, transcripts_csv):
         if not path:
             continue
-        for key, row in load_csv_table(path).items():
+        try:
+            table = load_csv_table(path)
+        except Exception as exc:
+            print(f"  ! warning: could not load {path}: {exc}")
+            continue
+        for key, row in table.items():
             merged.setdefault(key, {}).update(row)
     return merged
 
