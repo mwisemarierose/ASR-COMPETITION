@@ -74,9 +74,16 @@ if [[ "$SPLIT" == "train" || -z "$SPLIT" ]]; then
   CMD+=(--skip-audio-check --skip-verify)
 fi
 
-  # Extract always runs sequentially in code; workers only apply to clean.
-  if [[ "$STEP" == "clean" && -n "${SLURM_CPUS_PER_TASK:-}" && "${SLURM_CPUS_PER_TASK}" -gt 1 ]]; then
-    CMD+=(--workers "$SLURM_CPUS_PER_TASK")
+  # Extract: batched child processes (memory-safe); cap workers on large train splits.
+  if [[ "$STEP" == "extract" || ( -z "$STEP" && -n "$SPLIT" ) ]]; then
+    WORKERS=4
+  elif [[ "$STEP" == "clean" && -n "${SLURM_CPUS_PER_TASK:-}" && "${SLURM_CPUS_PER_TASK}" -gt 1 ]]; then
+    WORKERS="$SLURM_CPUS_PER_TASK"
+  else
+    WORKERS=""
+  fi
+  if [[ -n "$WORKERS" ]]; then
+    CMD+=(--workers "$WORKERS")
   fi
 
 echo "Running: ${CMD[*]}"

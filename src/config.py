@@ -100,8 +100,11 @@ N_MELS = 80
 N_FFT = 400
 HOP_LENGTH = 160
 
-# Anv-ke extract: cap parallel batch size and full-shard reads to avoid OOM on HPC.
+# Anv-ke extract: batched child processes balance speed vs OOM/segfault isolation.
 ANV_CLIPS_PER_BATCH = 50
+ANV_ISOLATED_BATCH_SIZE = 40
+ANV_EXTRACT_MAX_WORKERS = 4
+ANV_BATCH_TIMEOUT_SEC = 600
 MAX_PARQUET_COLUMN_LOAD_BYTES = 150 * 1024 * 1024
 
 # Afrivoice manifest + audio layout

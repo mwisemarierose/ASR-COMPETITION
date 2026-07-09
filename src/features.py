@@ -13,7 +13,14 @@ import pandas as pd
 from tqdm import tqdm
 
 from .audio_utils import load_parquet_row_audio
-from .config import ANV_CLIPS_PER_BATCH, N_MELS, PipelineConfig
+from .config import (
+    ANV_BATCH_TIMEOUT_SEC,
+    ANV_CLIPS_PER_BATCH,
+    ANV_EXTRACT_MAX_WORKERS,
+    ANV_ISOLATED_BATCH_SIZE,
+    N_MELS,
+    PipelineConfig,
+)
 from .mel_features import audio_to_log_mel, wav_path_to_log_mel
 
 ExtractResult = tuple[int, dict[str, Any] | None, str | None]
@@ -311,11 +318,6 @@ class FeaturePipeline:
             return {**report_key, **self._empty_counts(out_manifest)}
 
         if self.config.is_anv:
-            if self.config.workers > 1:
-                print(
-                    f"  Note: Anv-ke extract uses isolated single-clip workers "
-                    f"(ignoring --workers {self.config.workers}) to avoid Parquet OOM/crashes."
-                )
             rows, stats = self._extract_anv_safe(label, indexed_rows, feat_dir)
         elif self.config.workers > 1:
             rows, stats = self._extract_parallel(label, indexed_rows, feat_dir)
@@ -340,29 +342,54 @@ class FeaturePipeline:
         indexed_rows: list[tuple[int, dict[str, Any]]],
         feat_dir: Path,
     ) -> tuple[list[dict[str, Any]], dict[str, int]]:
-        """Anv-ke extract with one child process per clip so segfaults skip corrupt audio only."""
+        """Anv-ke extract: resume in parent; decode in batched child processes."""
         feat_dir.mkdir(parents=True, exist_ok=True)
-        print(
-            f"  extracting with isolated workers, {len(indexed_rows)} clips "
-            f"(resume in parent, decode in child)"
-        )
+        workers = min(max(1, self.config.workers), ANV_EXTRACT_MAX_WORKERS, len(indexed_rows))
 
         batch_results: list[ExtractResult] = []
-        executor: ProcessPoolExecutor | None = None
-        with tqdm(total=len(indexed_rows), desc=f"  {label}") as progress:
-            for index, row in indexed_rows:
-                out_path = _feature_out_path(row, feat_dir)
-                if out_path is not None and out_path.is_file() and out_path.stat().st_size > 0:
-                    batch_results.append(_resumed_feature_result(index, row, out_path))
-                    progress.update(1)
-                    continue
+        pending: list[tuple[int, dict[str, Any]]] = []
+        for index, row in indexed_rows:
+            out_path = _feature_out_path(row, feat_dir)
+            if out_path is not None and out_path.is_file() and out_path.stat().st_size > 0:
+                batch_results.append(_resumed_feature_result(index, row, out_path))
+            else:
+                pending.append((index, row))
 
+        print(
+            f"  extracting {len(pending)} clip(s) with {workers} worker(s), "
+            f"batch size {ANV_ISOLATED_BATCH_SIZE} "
+            f"({len(batch_results)} resumed; failed batches retry one-at-a-time)"
+        )
+
+        failed_clips: list[tuple[int, dict[str, Any]]] = []
+        if pending:
+            batches = [
+                pending[offset : offset + ANV_ISOLATED_BATCH_SIZE]
+                for offset in range(0, len(pending), ANV_ISOLATED_BATCH_SIZE)
+            ]
+            feat_dir_str = str(feat_dir)
+            with ProcessPoolExecutor(max_workers=workers, max_tasks_per_child=1) as executor:
+                future_to_batch = {
+                    executor.submit(_extract_feature_batch, batch, feat_dir_str): batch
+                    for batch in batches
+                }
+                with tqdm(total=len(indexed_rows), initial=len(batch_results), desc=f"  {label}") as progress:
+                    for future in as_completed(future_to_batch):
+                        batch = future_to_batch[future]
+                        try:
+                            batch_results.extend(future.result(timeout=ANV_BATCH_TIMEOUT_SEC))
+                        except Exception:
+                            failed_clips.extend(batch)
+                        progress.update(len(batch))
+
+        if failed_clips:
+            print(f"  retrying {len(failed_clips)} clip(s) in isolated child processes...")
+            executor: ProcessPoolExecutor | None = None
+            for index, row in failed_clips:
                 result, executor = _extract_indexed_row_isolated(index, row, feat_dir, executor)
                 batch_results.append(result)
-                progress.update(1)
-
-        if executor is not None:
-            executor.shutdown(wait=True)
+            if executor is not None:
+                executor.shutdown(wait=True)
 
         return self._collect_results(batch_results)
 
