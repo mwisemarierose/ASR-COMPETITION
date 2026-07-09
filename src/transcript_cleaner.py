@@ -34,3 +34,23 @@ class SwahiliTranscriptCleaner(BaseTranscriptCleaner):
         text = text.lower().strip()
         text = _WHITESPACE_PATTERN.sub(" ", text)
         return text
+
+
+_DISFLUENCY_PATTERN = re.compile(
+    r"\[(pause|sigh|laugh|breath|noise|silence)\]",
+    re.IGNORECASE,
+)
+_PUNCTUATION_PATTERN = re.compile(r'[.,;:?!"/\\]')
+
+
+def clean_anv_transcript(text: str) -> str:
+    """Normalize Anv-ke transcripts (lowercase, strip disfluency markers)."""
+    if not text:
+        return ""
+
+    cleaned = _CS_TAG_PATTERN.sub(r"\1", text)
+    cleaned = _DISFLUENCY_PATTERN.sub(" ", cleaned)
+    cleaned = _PUNCTUATION_PATTERN.sub(" ", cleaned)
+    cleaned = cleaned.lower().strip()
+    cleaned = _WHITESPACE_PATTERN.sub(" ", cleaned)
+    return cleaned

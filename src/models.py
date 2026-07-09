@@ -18,19 +18,35 @@ class AfrivoiceRecord:
 
     @property
     def key(self) -> str:
-        return str(self.raw.get("key", ""))
+        for field in ("key", "speaker_id", "uid", "id"):
+            value = str(self.raw.get(field, "") or "").strip()
+            if value:
+                return value
+        return ""
 
     @property
     def transcription(self) -> str:
-        return str(self.raw.get("transcription", "") or "").strip()
+        for field in ("transcription", "text", "sentence"):
+            value = str(self.raw.get(field, "") or "").strip()
+            if value:
+                return value
+        return ""
 
     @property
     def normalized_transcription(self) -> str:
-        return str(self.raw.get("normalized_transcription", "") or "").strip()
+        for field in ("normalized_transcription", "normalized_text"):
+            value = str(self.raw.get(field, "") or "").strip()
+            if value:
+                return value
+        return ""
 
     @property
     def audio_filename(self) -> str:
-        return str(self.raw.get("audio_filepath", "") or "").strip()
+        for field in ("audio_filepath", "audio_path", "path_audio"):
+            value = str(self.raw.get(field, "") or "").strip()
+            if value:
+                return Path(value).name
+        return ""
 
     @property
     def manifest_duration(self) -> float | None:
@@ -45,16 +61,25 @@ class AfrivoiceRecord:
 
 @dataclass
 class SplitContext:
-    """Resolved paths for one domain/split folder."""
+    """Resolved paths for one dataset split (Afrivoice domain/split or Anv split/style)."""
 
-    domain: str
     split: str
     folder: Path
-    audio_dir: Path
+    domain: str = ""
+    language: str = ""
+    style: str = ""
+    audio_dir: Path | None = None
     manifest_paths: list[Path] = field(default_factory=list)
     audio_archives: list[Path] = field(default_factory=list)
     extracted_audio_dir: Path | None = None
     audio_index: dict[str, Path] | None = None
+    parquet_paths: tuple[Path, ...] = ()
+    meta_csv: Path | None = None
+    transcripts_csv: Path | None = None
+
+    @property
+    def is_parquet(self) -> bool:
+        return bool(self.parquet_paths)
 
 
 @dataclass

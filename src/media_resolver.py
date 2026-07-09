@@ -43,7 +43,8 @@ class MediaResolver:
         key: str | None = None,
     ) -> Path:
         if not filename and not key:
-            return context.audio_dir / "missing"
+            fallback = context.audio_dir or context.folder
+            return fallback / "missing"
 
         candidates = MediaResolver._candidate_names(filename, key)
         if context.audio_index:
@@ -105,7 +106,7 @@ class MediaResolver:
         dirs: list[Path] = []
         if context.extracted_audio_dir and context.extracted_audio_dir.is_dir():
             dirs.append(context.extracted_audio_dir)
-        if context.audio_dir.is_dir():
+        if context.audio_dir and context.audio_dir.is_dir():
             dirs.append(context.audio_dir)
         dirs.append(context.folder)
         return tuple(dirs)

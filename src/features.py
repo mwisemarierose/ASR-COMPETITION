@@ -1,5 +1,5 @@
 """
-Step 3: extract 80-bin log-mel features from preprocessed audio.
+Extract 80-bin log-mel features from preprocessed WAV or Parquet manifests.
 """
 from __future__ import annotations
 
@@ -8,32 +8,19 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
 
-import librosa
 import numpy as np
 import pandas as pd
 from tqdm import tqdm
 
-from .config import HOP_LENGTH, N_FFT, N_MELS, SAMPLE_RATE, PipelineConfig
+from .audio_utils import load_parquet_row_audio
+from .config import N_MELS, PipelineConfig
+from .mel_features import audio_to_log_mel, wav_path_to_log_mel
 
 ExtractResult = tuple[int, dict[str, Any] | None, str | None]
-
-# Keep batches small so progress updates frequently on large train splits.
 CLIPS_PER_BATCH = 250
 
 
-def _wav_to_log_mel(wav_path: Path) -> np.ndarray:
-    audio, sr = librosa.load(wav_path, sr=SAMPLE_RATE, mono=True)
-    mel = librosa.feature.melspectrogram(
-        y=audio,
-        sr=sr,
-        n_fft=N_FFT,
-        hop_length=HOP_LENGTH,
-        n_mels=N_MELS,
-    )
-    return librosa.power_to_db(mel, ref=np.max)
-
-
-def _extract_feature_row(row: dict[str, Any], feat_dir: Path) -> tuple[dict[str, Any] | None, str | None]:
+def _extract_wav_row(row: dict[str, Any], feat_dir: Path) -> tuple[dict[str, Any] | None, str | None]:
     wav = Path(row["audio_path"])
     if not wav.is_file():
         return None, "missing_audio"
@@ -47,7 +34,7 @@ def _extract_feature_row(row: dict[str, Any], feat_dir: Path) -> tuple[dict[str,
         return processed, "resumed"
 
     try:
-        mel = _wav_to_log_mel(wav)
+        mel = wav_path_to_log_mel(wav)
         np.save(out_path, mel)
     except Exception:
         return None, "corrupt_audio"
@@ -56,6 +43,46 @@ def _extract_feature_row(row: dict[str, Any], feat_dir: Path) -> tuple[dict[str,
     processed["feature_path"] = str(out_path.resolve())
     processed["feature_shape"] = str(list(mel.shape))
     return processed, None
+
+
+def _extract_parquet_row(row: dict[str, Any], feat_dir: Path) -> tuple[dict[str, Any] | None, str | None]:
+    audio_source = row.get("audio_source") or {}
+    if audio_source.get("type") != "parquet":
+        return None, "missing_audio"
+
+    parquet_path = Path(audio_source["path"])
+    row_index = int(audio_source["row"])
+    out_path = feat_dir / f"{row.get('key', f'{parquet_path.stem}_{row_index:06d}')}.npy"
+
+    if out_path.is_file() and out_path.stat().st_size > 0:
+        processed = dict(row)
+        mel = np.load(out_path, mmap_mode="r")
+        processed["feature_path"] = str(out_path.resolve())
+        processed["feature_shape"] = str(list(mel.shape))
+        return processed, "resumed"
+
+    if not parquet_path.is_file():
+        return None, "missing_audio"
+
+    try:
+        audio = load_parquet_row_audio(parquet_path, row_index)
+        mel = audio_to_log_mel(audio)
+        np.save(out_path, mel)
+    except Exception:
+        return None, "corrupt_audio"
+
+    processed = dict(row)
+    processed["feature_path"] = str(out_path.resolve())
+    processed["feature_shape"] = str(list(mel.shape))
+    return processed, None
+
+
+def _extract_feature_row(row: dict[str, Any], feat_dir: Path) -> tuple[dict[str, Any] | None, str | None]:
+    if row.get("audio_source", {}).get("type") == "parquet":
+        return _extract_parquet_row(row, feat_dir)
+    if "audio_path" in row:
+        return _extract_wav_row(row, feat_dir)
+    return None, "missing_audio"
 
 
 def _extract_feature_batch(
@@ -71,14 +98,24 @@ def _extract_feature_batch(
     return results
 
 
-class AfrivoiceFeaturePipeline:
-    """Extract log-mel features for all processed splits."""
+class FeaturePipeline:
+    """Extract log-mel features for Afrivoice WAV or Anv-ke Parquet manifests."""
 
     def __init__(self, config: PipelineConfig) -> None:
         self.config = config
 
-    def run_extract(self, domain: str | None = None, split: str | None = None) -> int:
-        targets = self._targets(domain, split)
+    def run_extract(
+        self,
+        domain: str | None = None,
+        split: str | None = None,
+        style: str | None = None,
+    ) -> int:
+        if self.config.is_anv:
+            return self._run_anv_extract(split=split, style=style)
+        return self._run_afrivoice_extract(domain=domain, split=split)
+
+    def _run_afrivoice_extract(self, domain: str | None, split: str | None) -> int:
+        targets = self._afrivoice_targets(domain, split)
         if not targets:
             print("No processed manifests found. Run preprocessing first.")
             return 1
@@ -86,7 +123,7 @@ class AfrivoiceFeaturePipeline:
         reports: list[dict[str, Any]] = []
         for dom, spl, manifest_path in targets:
             print(f"\nExtracting features {dom}/{spl}...")
-            report = self._extract_split(dom, spl, manifest_path)
+            report = self._extract_afrivoice_split(dom, spl, manifest_path)
             reports.append(report)
             print(
                 f"  features: {report['extracted']}/{report['input']} "
@@ -94,29 +131,81 @@ class AfrivoiceFeaturePipeline:
                 f"resumed={report['resumed']})"
             )
 
-        self._write_report(reports)
+        self._write_afrivoice_report(reports)
         print("\nFeature extraction complete.")
         return 0
 
-    def _extract_split(self, domain: str, split: str, manifest_path: Path) -> dict[str, Any]:
+    def _run_anv_extract(self, split: str | None, style: str | None) -> int:
+        targets = self._anv_targets(split, style)
+        if not targets:
+            print("No cleaned manifests found. Run clean first.")
+            return 1
+
+        reports: list[dict[str, Any]] = []
+        for language, spl, sty, manifest_path in targets:
+            print(f"\nExtracting features {language}/{spl}/{sty}...")
+            report = self._extract_anv_split(language, spl, sty, manifest_path)
+            reports.append(report)
+            print(
+                f"  features: {report['extracted']}/{report['input']} "
+                f"(missing={report['missing_audio']}, corrupt={report['corrupt_audio']}, "
+                f"resumed={report['resumed']})"
+            )
+
+        self._write_anv_report(reports)
+        print("\nFeature extraction complete.")
+        return 0
+
+    def _extract_afrivoice_split(self, domain: str, split: str, manifest_path: Path) -> dict[str, Any]:
         feat_dir = self.config.features_dir / domain / split
         feat_dir.mkdir(parents=True, exist_ok=True)
         out_manifest = self.config.features_dir / domain / f"{split}_features.tsv"
+        return self._extract_manifest(
+            indexed_rows=self._load_rows(manifest_path),
+            feat_dir=feat_dir,
+            out_manifest=out_manifest,
+            label=f"{domain}/{split}",
+            report_key={"domain": domain, "split": split},
+        )
 
-        indexed_rows = self._load_rows(manifest_path)
+    def _extract_anv_split(
+        self,
+        language: str,
+        split: str,
+        style: str,
+        manifest_path: Path,
+    ) -> dict[str, Any]:
+        feat_dir = self.config.features_split_dir(split, style)
+        feat_dir.mkdir(parents=True, exist_ok=True)
+        out_manifest = feat_dir / "features.tsv"
+        return self._extract_manifest(
+            indexed_rows=self._load_rows(manifest_path),
+            feat_dir=feat_dir,
+            out_manifest=out_manifest,
+            label=f"{language}/{split}/{style}",
+            report_key={"language": language, "split": split, "style": style},
+        )
+
+    def _extract_manifest(
+        self,
+        indexed_rows: list[tuple[int, dict[str, Any]]],
+        feat_dir: Path,
+        out_manifest: Path,
+        label: str,
+        report_key: dict[str, str],
+    ) -> dict[str, Any]:
         if not indexed_rows:
             self._write_manifest(out_manifest, [])
-            return self._empty_report(domain, split, out_manifest)
+            return {**report_key, **self._empty_counts(out_manifest)}
 
         if self.config.workers > 1:
-            rows, stats = self._extract_split_parallel(domain, split, indexed_rows, feat_dir)
+            rows, stats = self._extract_parallel(label, indexed_rows, feat_dir)
         else:
-            rows, stats = self._extract_split_sequential(indexed_rows, feat_dir)
+            rows, stats = self._extract_sequential(indexed_rows, feat_dir)
 
         self._write_manifest(out_manifest, rows)
         return {
-            "domain": domain,
-            "split": split,
+            **report_key,
             "input": len(indexed_rows),
             "extracted": len(rows),
             "missing_audio": stats["missing_audio"],
@@ -126,7 +215,7 @@ class AfrivoiceFeaturePipeline:
             "output_manifest": str(out_manifest),
         }
 
-    def _extract_split_sequential(
+    def _extract_sequential(
         self,
         indexed_rows: list[tuple[int, dict[str, Any]]],
         feat_dir: Path,
@@ -137,10 +226,9 @@ class AfrivoiceFeaturePipeline:
             batch_results.append((index, processed, skip_reason))
         return self._collect_results(batch_results)
 
-    def _extract_split_parallel(
+    def _extract_parallel(
         self,
-        domain: str,
-        split: str,
+        label: str,
         indexed_rows: list[tuple[int, dict[str, Any]]],
         feat_dir: Path,
     ) -> tuple[list[dict[str, Any]], dict[str, int]]:
@@ -162,7 +250,7 @@ class AfrivoiceFeaturePipeline:
                 executor.submit(_extract_feature_batch, batch, str(feat_dir)): len(batch)
                 for batch in batches
             }
-            with tqdm(total=len(indexed_rows), desc=f"  {domain}/{split}") as progress:
+            with tqdm(total=len(indexed_rows), desc=f"  {label}") as progress:
                 for future in as_completed(future_to_size):
                     try:
                         batch_results.extend(future.result())
@@ -214,10 +302,8 @@ class AfrivoiceFeaturePipeline:
         df.to_csv(out_manifest, sep="\t", index=False)
 
     @staticmethod
-    def _empty_report(domain: str, split: str, out_manifest: Path) -> dict[str, Any]:
+    def _empty_counts(out_manifest: Path) -> dict[str, Any]:
         return {
-            "domain": domain,
-            "split": split,
             "input": 0,
             "extracted": 0,
             "missing_audio": 0,
@@ -227,7 +313,7 @@ class AfrivoiceFeaturePipeline:
             "output_manifest": str(out_manifest),
         }
 
-    def _targets(self, domain: str | None, split: str | None) -> list[tuple[str, str, Path]]:
+    def _afrivoice_targets(self, domain: str | None, split: str | None) -> list[tuple[str, str, Path]]:
         targets: list[tuple[str, str, Path]] = []
         processed_root = self.config.processed_root
         if not processed_root.is_dir():
@@ -250,7 +336,37 @@ class AfrivoiceFeaturePipeline:
                     targets.append((dom, spl, manifest))
         return targets
 
-    def _write_report(self, reports: list[dict[str, Any]]) -> None:
+    def _anv_targets(
+        self,
+        split: str | None,
+        style: str | None,
+    ) -> list[tuple[str, str, str, Path]]:
+        targets: list[tuple[str, str, str, Path]] = []
+        if not self.config.language:
+            return targets
+
+        cleaned_root = self.config.output_root / self.config.language
+        if not cleaned_root.is_dir():
+            return targets
+
+        for split_dir in sorted(cleaned_root.iterdir()):
+            if not split_dir.is_dir():
+                continue
+            spl = split_dir.name
+            if split and spl != split:
+                continue
+            for style_dir in sorted(split_dir.iterdir()):
+                if not style_dir.is_dir():
+                    continue
+                sty = style_dir.name
+                if style and sty != style:
+                    continue
+                manifest = style_dir / "manifest_cleaned.jsonl"
+                if manifest.is_file():
+                    targets.append((self.config.language, spl, sty, manifest))
+        return targets
+
+    def _write_afrivoice_report(self, reports: list[dict[str, Any]]) -> None:
         self.config.stats_dir.mkdir(parents=True, exist_ok=True)
         by_domain: dict[str, list[dict[str, Any]]] = {}
         for report in reports:
@@ -262,5 +378,14 @@ class AfrivoiceFeaturePipeline:
             path.write_text(json.dumps(domain_reports, indent=2), encoding="utf-8")
             saved_paths.append(path)
 
-        joined = ", ".join(str(path) for path in saved_paths)
-        print(f"\nSaved report(s): {joined}")
+        print(f"\nSaved report(s): {', '.join(str(path) for path in saved_paths)}")
+
+    def _write_anv_report(self, reports: list[dict[str, Any]]) -> None:
+        self.config.stats_dir.mkdir(parents=True, exist_ok=True)
+        path = self.config.stats_dir / f"feature_extraction_report_{self.config.language}.json"
+        path.write_text(json.dumps(reports, indent=2), encoding="utf-8")
+        print(f"\nSaved report: {path}")
+
+
+# Backward-compatible alias
+AfrivoiceFeaturePipeline = FeaturePipeline

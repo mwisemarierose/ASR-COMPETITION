@@ -495,6 +495,126 @@ print(d.list_available_splits())
 
 ---
 
+## Afrivoice Somali and other languages
+
+[Somali in DigitalUmuganda/Afrivoice](https://huggingface.co/datasets/DigitalUmuganda/Afrivoice) uses the **same pipeline as Swahili** (`clean → preprocess → extract`) — only the folder layout differs:
+
+| | Swahili (`Afrivoice_Swahili`) | Somali / Shona / etc. (`Afrivoice`) |
+|---|---|---|
+| Folder layout | `{domain}_swahili_{split}/` | `Somali/` (flat language folder) |
+| Manifests | `manifest_*.jsonl` | `manifest_*.json` |
+| Audio archives | `audio/audio_*.tar.xz` | `audio_shards/audio_*.tar.xz` |
+| Split | `train`, `dev`, `test` per domain | `all` (whole language corpus) |
+
+```bash
+export AFRIVOICE_DATASET_ROOT=/project/community/rmwisene/datasets/Afrivoice
+
+# Point directly at the Somali folder (or parent Afrivoice repo)
+python run_pipeline.py \
+  --dataset-type afrivoice \
+  --language somali \
+  --dataset-root $AFRIVOICE_DATASET_ROOT/Somali \
+  --work-dir $WORK_DIR \
+  --step clean \
+  --skip-audio-check \
+  --workers 8
+```
+
+**Note:** `DigitalUmuganda/Afrivoice` Somali is **not** the same as `Anv-ke/Somali` (Parquet). Use `--dataset-type afrivoice` for the Umuganda repo and `--dataset-type anv` for Anv-ke.
+
+---
+
+## Anv-ke languages (Kalenjin, Dholuo, Kikuyu, Somali, Maasai)
+
+[Anv-ke](https://huggingface.co/Anv-ke) datasets use Parquet audio shards plus CSV metadata. The **same** `run_pipeline.py`, `src/config.py`, `src/pipeline.py`, and `src/features.py` handle both Swahili and Anv-ke — switch with `--dataset-type anv --language <slug>`. No WAV materialization for Anv-ke; audio is streamed from Parquet during extract.
+
+### Layout (per language)
+
+```text
+Kalenjin/
+├── train/
+│   ├── scripted/
+│   │   ├── audios/*.parquet
+│   │   └── files/{meta.csv,transcripts.csv}
+│   └── unscripted/...
+├── dev/...
+├── test/...
+└── dev_test/...          # some releases use dev_test instead of dev/test
+```
+
+### Orchard example (Kalenjin)
+
+```bash
+export ANV_DATASET_ROOT=/project/community/rmwisene/datasets/Anv-ke
+export WORK_DIR=/project/community/rmwisene/pipeline_outputs
+
+# Clean one split/style
+python run_pipeline.py \
+  --dataset-type anv \
+  --language kalenjin \
+  --dataset-root $ANV_DATASET_ROOT/Kalenjin \
+  --work-dir $WORK_DIR \
+  --split dev \
+  --style unscripted \
+  --step clean \
+  --skip-audio-check \
+  --workers 8
+
+# Extract features (streams from Parquet)
+python run_pipeline.py \
+  --dataset-type anv \
+  --language kalenjin \
+  --dataset-root $ANV_DATASET_ROOT/Kalenjin \
+  --work-dir $WORK_DIR \
+  --step extract \
+  --workers 4
+```
+
+### Supported `--language` values
+
+| Slug | HuggingFace repo |
+|------|------------------|
+| `kalenjin` | Anv-ke/Kalenjin |
+| `dholuo` or `luo` | Anv-ke/Dholuo |
+| `kikuyu` | Anv-ke/Kikuyu |
+| `somali` | Anv-ke/Somali |
+| `maasai` | Anv-ke/Maasai |
+
+### Outputs
+
+```text
+$WORK_DIR/cleaned/<language>/<split>/<style>/manifest_cleaned.jsonl
+$WORK_DIR/features/<language>/<split>/<style>/*.npy
+$WORK_DIR/features/<language>/<split>/<style>/features.tsv
+```
+
+### Local smoke test
+
+```bash
+pip install -r requirements.txt
+python tests/test_anv_pipeline.py
+```
+
+### Orchard SLURM
+
+```bash
+mkdir -p logs
+
+# Clean + extract one split/style (interactive srun works too)
+sbatch scripts/orchard_anv_pipeline.slurm kalenjin train unscripted clean
+sbatch scripts/orchard_anv_pipeline.slurm kalenjin train unscripted extract
+
+# Roll out all languages (after HF download to $ANV_DATASET_ROOT)
+for lang in kalenjin dholuo kikuyu somali maasai; do
+  for style in scripted unscripted; do
+    sbatch scripts/orchard_anv_pipeline.slurm "$lang" train "$style" clean
+    sbatch scripts/orchard_anv_pipeline.slurm "$lang" train "$style" extract
+  done
+done
+```
+
+---
+
 ## Requirements implemented
 
 | Task | Step |

@@ -1,18 +1,24 @@
 """
-Robust audio duration probing and decoding for Afrivoice .webm files.
+Audio decoding for file-based (Afrivoice) and Parquet-embedded (Anv-ke) clips.
 """
-
 from __future__ import annotations
 
+import io
 from pathlib import Path
+from typing import Any
 
 import av
 import numpy as np
+import pyarrow.parquet as pq
 import soundfile as sf
 
 from .config import SAMPLE_RATE
 from .ffmpeg_setup import configure_ffmpeg, probe_duration
 from .models import AfrivoiceRecord
+
+PARQUET_AUDIO_COLUMNS = ("audio", "bytes", "audio_bytes")
+PARQUET_TEXT_COLUMNS = ("transcription", "transcript", "text", "sentence")
+PARQUET_ID_COLUMNS = ("recorder_uuid", "mediaPathId", "media_path_id", "id", "key")
 
 
 def _frame_to_mono_float32(frame: av.AudioFrame) -> np.ndarray:
@@ -95,4 +101,79 @@ def get_audio_duration(
     if record is not None and record.manifest_duration is not None and path.is_file():
         return record.manifest_duration
 
+    return None
+
+
+def audio_bytes_from_struct(audio_value: Any) -> bytes | None:
+    """Extract raw bytes from HF-style audio struct {"bytes": ..., "path": ...}."""
+    if audio_value is None:
+        return None
+    if isinstance(audio_value, (bytes, bytearray)):
+        return bytes(audio_value)
+    if isinstance(audio_value, dict):
+        payload = audio_value.get("bytes")
+        if payload:
+            return bytes(payload)
+    return None
+
+
+def _decode_audio_bytes(audio_bytes: bytes, sample_rate: int = SAMPLE_RATE) -> np.ndarray:
+    resampler = av.AudioResampler(format="flt", layout="mono", rate=sample_rate)
+    chunks: list[np.ndarray] = []
+
+    with av.open(io.BytesIO(audio_bytes), metadata_errors="ignore") as container:
+        if not container.streams.audio:
+            raise RuntimeError("No audio stream in parquet bytes")
+
+        for frame in container.decode(audio=0):
+            for resampled in resampler.resample(frame):
+                chunks.append(_frame_to_mono_float32(resampled))
+
+        for resampled in resampler.resample(None):
+            chunks.append(_frame_to_mono_float32(resampled))
+
+    if not chunks:
+        raise RuntimeError("No audio frames decoded from parquet bytes")
+
+    return np.concatenate(chunks).astype(np.float32, copy=False)
+
+
+def duration_from_audio_bytes(audio_bytes: bytes, sample_rate: int = SAMPLE_RATE) -> float:
+    audio = _decode_audio_bytes(audio_bytes, sample_rate=sample_rate)
+    return float(len(audio) / sample_rate)
+
+
+def load_parquet_row_audio(
+    parquet_path: Path,
+    row_index: int,
+    sample_rate: int = SAMPLE_RATE,
+) -> np.ndarray:
+    audio_col = _resolve_parquet_audio_column(parquet_path)
+    table = pq.read_table(parquet_path, columns=[audio_col])
+    audio_value = table.column(0)[row_index].as_py()
+    audio_bytes = audio_bytes_from_struct(audio_value)
+    if not audio_bytes:
+        raise RuntimeError(f"Missing audio bytes at {parquet_path}:{row_index}")
+    return _decode_audio_bytes(audio_bytes, sample_rate=sample_rate)
+
+
+def _resolve_parquet_audio_column(parquet_path: Path) -> str:
+    schema_names = pq.read_schema(parquet_path).names
+    for candidate in PARQUET_AUDIO_COLUMNS:
+        if candidate in schema_names:
+            return candidate
+    raise RuntimeError(f"No audio column found in {parquet_path}; columns={schema_names}")
+
+
+def resolve_parquet_text_column(schema_names: list[str]) -> str | None:
+    for candidate in PARQUET_TEXT_COLUMNS:
+        if candidate in schema_names:
+            return candidate
+    return None
+
+
+def resolve_parquet_id_column(schema_names: list[str]) -> str | None:
+    for candidate in PARQUET_ID_COLUMNS:
+        if candidate in schema_names:
+            return candidate
     return None

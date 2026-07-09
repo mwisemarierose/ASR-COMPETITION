@@ -27,15 +27,16 @@ class RecordFilter:
     def __init__(self, config: PipelineConfig) -> None:
         self.config = config
         self.transcript_cleaner = SwahiliTranscriptCleaner()
-        self.validators = [
-            TranscriptValidator(),
-            AudioFileValidator(),
+        self.validators = [TranscriptValidator()]
+        if config.verify_audio:
+            self.validators.append(AudioFileValidator())
+        self.validators.append(
             AudioDurationValidator(
                 min_duration_sec=config.min_duration_sec,
                 max_duration_sec=config.max_duration_sec,
                 verify_audio=config.verify_audio,
-            ),
-        ]
+            )
+        )
         if config.verify_alignment and config.verify_audio:
             self.validators.append(AlignmentValidator())
         self._seen_keys: set[str] = set()
