@@ -74,14 +74,10 @@ if [[ "$SPLIT" == "train" || -z "$SPLIT" ]]; then
   CMD+=(--skip-audio-check --skip-verify)
 fi
 
-if [[ -n "${SLURM_CPUS_PER_TASK:-}" && "${SLURM_CPUS_PER_TASK}" -gt 1 ]]; then
-  WORKERS="$SLURM_CPUS_PER_TASK"
-  # Extract is memory-heavy — cap workers to avoid OOM on Parquet decode
-  if [[ "$STEP" == "extract" || ( -z "$STEP" && "$SPLIT" != "dev" ) ]]; then
-    WORKERS=4
+  # Extract always runs sequentially in code; workers only apply to clean.
+  if [[ "$STEP" == "clean" && -n "${SLURM_CPUS_PER_TASK:-}" && "${SLURM_CPUS_PER_TASK}" -gt 1 ]]; then
+    CMD+=(--workers "$SLURM_CPUS_PER_TASK")
   fi
-  CMD+=(--workers "$WORKERS")
-fi
 
 echo "Running: ${CMD[*]}"
 "${CMD[@]}"

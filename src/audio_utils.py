@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 import av
+import librosa
 import numpy as np
 import pyarrow.parquet as pq
 import soundfile as sf
@@ -121,6 +122,19 @@ def audio_bytes_from_struct(audio_value: Any) -> bytes | None:
 
 
 def _decode_audio_bytes(audio_bytes: bytes, sample_rate: int = SAMPLE_RATE) -> np.ndarray:
+    """Decode embedded audio bytes; prefer soundfile for WAV to avoid PyAV crashes."""
+    if audio_bytes[:4] == b"RIFF" or audio_bytes[:4] == b"fLaC":
+        try:
+            audio, file_sr = sf.read(io.BytesIO(audio_bytes), dtype="float32", always_2d=False)
+            if audio.ndim > 1:
+                audio = audio.mean(axis=1)
+            audio = np.asarray(audio, dtype=np.float32)
+            if file_sr != sample_rate:
+                audio = librosa.resample(audio, orig_sr=file_sr, target_sr=sample_rate)
+            return audio
+        except Exception:
+            pass
+
     resampler = av.AudioResampler(format="flt", layout="mono", rate=sample_rate)
     chunks: list[np.ndarray] = []
 
@@ -151,7 +165,12 @@ def load_parquet_row_audio(
     row_index: int,
     sample_rate: int = SAMPLE_RATE,
 ) -> np.ndarray:
-    """Load one clip. Reads a single row group when possible (not the whole file)."""
+    """Load one clip without reading an entire Parquet row group into memory."""
+    audio_bytes = load_parquet_row_audio_bytes(parquet_path, row_index)
+    return _decode_audio_bytes(audio_bytes, sample_rate=sample_rate)
+
+
+def load_parquet_row_audio_bytes(parquet_path: Path, row_index: int) -> bytes:
     audio_col = _resolve_parquet_audio_column(parquet_path)
     pf = pq.ParquetFile(parquet_path)
 
@@ -160,12 +179,19 @@ def load_parquet_row_audio(
         n_rows = pf.metadata.row_group(rg).num_rows
         if row_index < cumulative + n_rows:
             local_idx = row_index - cumulative
-            table = pf.read_row_group(rg, columns=[audio_col])
-            audio_value = table.column(0)[local_idx].as_py()
-            audio_bytes = audio_bytes_from_struct(audio_value)
-            if not audio_bytes:
-                raise RuntimeError(f"Missing audio bytes at {parquet_path}:{row_index}")
-            return _decode_audio_bytes(audio_bytes, sample_rate=sample_rate)
+            for batch in pf.iter_batches(
+                batch_size=1,
+                row_groups=[rg],
+                columns=[audio_col],
+            ):
+                if local_idx == 0:
+                    audio_value = batch.column(0)[0].as_py()
+                    audio_bytes = audio_bytes_from_struct(audio_value)
+                    if not audio_bytes:
+                        raise RuntimeError(f"Missing audio bytes at {parquet_path}:{row_index}")
+                    return audio_bytes
+                local_idx -= 1
+            break
         cumulative += n_rows
 
     raise RuntimeError(f"Row {row_index} out of range for {parquet_path}")

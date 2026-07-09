@@ -12,13 +12,8 @@ import numpy as np
 import pandas as pd
 from tqdm import tqdm
 
-from .audio_utils import (
-    _decode_audio_bytes,
-    audio_bytes_from_struct,
-    load_parquet_audio_column,
-    load_parquet_row_audio,
-)
-from .config import N_MELS, PipelineConfig
+from .audio_utils import load_parquet_row_audio
+from .config import ANV_CLIPS_PER_BATCH, N_MELS, PipelineConfig
 from .mel_features import audio_to_log_mel, wav_path_to_log_mel
 
 ExtractResult = tuple[int, dict[str, Any] | None, str | None]
@@ -119,28 +114,6 @@ def _extract_parquet_file_rows(
 
     if not pending:
         return results
-
-    # One parquet read per batch of rows from the same shard (manifest is sorted by path).
-    if len(pending) >= 4:
-        try:
-            audio_column = load_parquet_audio_column(parquet_path)
-            for index, row, row_index, out_path in pending:
-                try:
-                    audio_bytes = audio_bytes_from_struct(audio_column[row_index].as_py())
-                    if not audio_bytes:
-                        results.append((index, None, "missing_audio"))
-                        continue
-                    mel = audio_to_log_mel(_decode_audio_bytes(audio_bytes))
-                    np.save(out_path, mel)
-                    processed = dict(row)
-                    processed["feature_path"] = str(out_path.resolve())
-                    processed["feature_shape"] = str(list(mel.shape))
-                    results.append((index, processed, None))
-                except Exception:
-                    results.append((index, None, "corrupt_audio"))
-            return results
-        except Exception:
-            pass  # fall back to per-row reads
 
     for index, row, row_index, out_path in pending:
         try:
@@ -280,7 +253,14 @@ class FeaturePipeline:
             self._write_manifest(out_manifest, [])
             return {**report_key, **self._empty_counts(out_manifest)}
 
-        if self.config.workers > 1:
+        if self.config.is_anv:
+            if self.config.workers > 1:
+                print(
+                    f"  Note: Anv-ke extract runs sequentially "
+                    f"(ignoring --workers {self.config.workers}) to avoid Parquet OOM/crashes."
+                )
+            rows, stats = self._extract_anv_safe(label, indexed_rows, feat_dir)
+        elif self.config.workers > 1:
             rows, stats = self._extract_parallel(label, indexed_rows, feat_dir)
         else:
             rows, stats = self._extract_sequential(indexed_rows, feat_dir)
@@ -296,6 +276,39 @@ class FeaturePipeline:
             "n_mels": N_MELS,
             "output_manifest": str(out_manifest),
         }
+
+    def _extract_anv_safe(
+        self,
+        label: str,
+        indexed_rows: list[tuple[int, dict[str, Any]]],
+        feat_dir: Path,
+    ) -> tuple[list[dict[str, Any]], dict[str, int]]:
+        """Sequential Anv-ke extract grouped by Parquet shard; one clip in memory at a time."""
+        feat_dir.mkdir(parents=True, exist_ok=True)
+        parquet_by_path: dict[str, list[tuple[int, dict[str, Any]]]] = {}
+        other_rows: list[tuple[int, dict[str, Any]]] = []
+
+        for index, row in indexed_rows:
+            if row.get("audio_source", {}).get("type") == "parquet":
+                path = str(row["audio_source"]["path"])
+                parquet_by_path.setdefault(path, []).append((index, row))
+            else:
+                other_rows.append((index, row))
+
+        print(f"  extracting sequentially, {len(indexed_rows)} clips")
+        batch_results: list[ExtractResult] = []
+        with tqdm(total=len(indexed_rows), desc=f"  {label}") as progress:
+            for index, row in other_rows:
+                processed, skip_reason = _extract_feature_row(row, feat_dir)
+                batch_results.append((index, processed, skip_reason))
+                progress.update(1)
+
+            for path_str in sorted(parquet_by_path):
+                items = parquet_by_path[path_str]
+                batch_results.extend(_extract_parquet_file_rows(Path(path_str), items, feat_dir))
+                progress.update(len(items))
+
+        return self._collect_results(batch_results)
 
     def _extract_sequential(
         self,
@@ -315,7 +328,8 @@ class FeaturePipeline:
         feat_dir: Path,
     ) -> tuple[list[dict[str, Any]], dict[str, int]]:
         workers = min(self.config.workers, len(indexed_rows))
-        target_batches = max(workers * 8, (len(indexed_rows) + CLIPS_PER_BATCH - 1) // CLIPS_PER_BATCH)
+        clips_per_batch = ANV_CLIPS_PER_BATCH if self.config.is_anv else CLIPS_PER_BATCH
+        target_batches = max(workers * 8, (len(indexed_rows) + clips_per_batch - 1) // clips_per_batch)
         chunk_size = max(1, (len(indexed_rows) + target_batches - 1) // target_batches)
         batches = [
             indexed_rows[index : index + chunk_size]
@@ -327,18 +341,26 @@ class FeaturePipeline:
             f"{len(indexed_rows)} clips, ~{chunk_size} clips/batch"
         )
         batch_results: list[ExtractResult] = []
+        failed_batches: list[list[tuple[int, dict[str, Any]]]] = []
         with ProcessPoolExecutor(max_workers=workers) as executor:
-            future_to_size = {
-                executor.submit(_extract_feature_batch, batch, str(feat_dir)): len(batch)
+            future_to_batch = {
+                executor.submit(_extract_feature_batch, batch, str(feat_dir)): batch
                 for batch in batches
             }
             with tqdm(total=len(indexed_rows), desc=f"  {label}") as progress:
-                for future in as_completed(future_to_size):
+                for future in as_completed(future_to_batch):
+                    batch = future_to_batch[future]
                     try:
                         batch_results.extend(future.result())
                     except Exception as exc:
                         print(f"  ! worker batch failed: {exc}")
-                    progress.update(future_to_size[future])
+                        failed_batches.append(batch)
+                    progress.update(len(batch))
+
+        if failed_batches:
+            print(f"  retrying {len(failed_batches)} failed batch(es) sequentially...")
+            for batch in failed_batches:
+                batch_results.extend(_extract_feature_batch(batch, str(feat_dir)))
 
         return self._collect_results(batch_results)
 

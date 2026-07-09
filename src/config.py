@@ -100,6 +100,10 @@ N_MELS = 80
 N_FFT = 400
 HOP_LENGTH = 160
 
+# Anv-ke extract: cap parallel batch size and full-shard reads to avoid OOM on HPC.
+ANV_CLIPS_PER_BATCH = 50
+MAX_PARQUET_COLUMN_LOAD_BYTES = 150 * 1024 * 1024
+
 # Afrivoice manifest + audio layout
 AUDIO_DIRNAMES = ("audio", "audio_shards")
 MANIFEST_GLOBS = ("manifest_*.jsonl", "manifest_*.json")
