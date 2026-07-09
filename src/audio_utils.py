@@ -122,8 +122,8 @@ def audio_bytes_from_struct(audio_value: Any) -> bytes | None:
 
 
 def _decode_audio_bytes(audio_bytes: bytes, sample_rate: int = SAMPLE_RATE) -> np.ndarray:
-    """Decode embedded audio bytes; prefer soundfile for WAV to avoid PyAV crashes."""
-    if audio_bytes[:4] == b"RIFF" or audio_bytes[:4] == b"fLaC":
+    """Decode embedded audio bytes; prefer soundfile/librosa before PyAV."""
+    if audio_bytes[:4] in (b"RIFF", b"fLaC", b"OggS") or audio_bytes[:3] == b"ID3":
         try:
             audio, file_sr = sf.read(io.BytesIO(audio_bytes), dtype="float32", always_2d=False)
             if audio.ndim > 1:
@@ -134,6 +134,12 @@ def _decode_audio_bytes(audio_bytes: bytes, sample_rate: int = SAMPLE_RATE) -> n
             return audio
         except Exception:
             pass
+
+    try:
+        audio, file_sr = librosa.load(io.BytesIO(audio_bytes), sr=sample_rate, mono=True)
+        return np.asarray(audio, dtype=np.float32)
+    except Exception:
+        pass
 
     resampler = av.AudioResampler(format="flt", layout="mono", rate=sample_rate)
     chunks: list[np.ndarray] = []

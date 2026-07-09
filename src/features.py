@@ -18,6 +18,63 @@ from .mel_features import audio_to_log_mel, wav_path_to_log_mel
 
 ExtractResult = tuple[int, dict[str, Any] | None, str | None]
 CLIPS_PER_BATCH = 250
+ANV_CLIP_TIMEOUT_SEC = 180
+
+
+def _feature_out_path(row: dict[str, Any], feat_dir: Path) -> Path | None:
+    audio_source = row.get("audio_source") or {}
+    if audio_source.get("type") == "parquet":
+        parquet_path = Path(audio_source["path"])
+        row_index = int(audio_source["row"])
+        return feat_dir / f"{row.get('key', f'{parquet_path.stem}_{row_index:06d}')}.npy"
+    if "audio_path" in row:
+        wav = Path(row["audio_path"])
+        return feat_dir / f"{row.get('key', wav.stem)}.npy"
+    return None
+
+
+def _resumed_feature_result(index: int, row: dict[str, Any], out_path: Path) -> ExtractResult:
+    processed = dict(row)
+    processed["feature_path"] = str(out_path.resolve())
+    if "feature_shape" not in processed:
+        try:
+            mel = np.load(out_path, mmap_mode="r")
+            processed["feature_shape"] = str(list(mel.shape))
+        except Exception:
+            processed["feature_shape"] = row.get("feature_shape", "")
+    return index, processed, "resumed"
+
+
+def _extract_indexed_row_worker(index: int, row_json: str, feat_dir: str) -> ExtractResult:
+    """Run one clip in a child process so native decode segfaults cannot kill the parent."""
+    row = json.loads(row_json)
+    processed, skip_reason = _extract_feature_row(row, Path(feat_dir))
+    return index, processed, skip_reason
+
+
+def _extract_indexed_row_isolated(
+    index: int,
+    row: dict[str, Any],
+    feat_dir: Path,
+    executor: ProcessPoolExecutor | None,
+) -> tuple[ExtractResult, ProcessPoolExecutor | None]:
+    row_json = json.dumps(row, ensure_ascii=False)
+    feat_dir_str = str(feat_dir)
+    retried = False
+
+    while True:
+        try:
+            if executor is None:
+                executor = ProcessPoolExecutor(max_workers=1, max_tasks_per_child=1)
+            future = executor.submit(_extract_indexed_row_worker, index, row_json, feat_dir_str)
+            return future.result(timeout=ANV_CLIP_TIMEOUT_SEC), executor
+        except Exception:
+            if executor is not None:
+                executor.shutdown(wait=False, cancel_futures=True)
+            executor = None
+            if retried:
+                return (index, None, "corrupt_audio"), executor
+            retried = True
 
 
 def _extract_wav_row(row: dict[str, Any], feat_dir: Path) -> tuple[dict[str, Any] | None, str | None]:
@@ -256,7 +313,7 @@ class FeaturePipeline:
         if self.config.is_anv:
             if self.config.workers > 1:
                 print(
-                    f"  Note: Anv-ke extract runs sequentially "
+                    f"  Note: Anv-ke extract uses isolated single-clip workers "
                     f"(ignoring --workers {self.config.workers}) to avoid Parquet OOM/crashes."
                 )
             rows, stats = self._extract_anv_safe(label, indexed_rows, feat_dir)
@@ -283,30 +340,29 @@ class FeaturePipeline:
         indexed_rows: list[tuple[int, dict[str, Any]]],
         feat_dir: Path,
     ) -> tuple[list[dict[str, Any]], dict[str, int]]:
-        """Sequential Anv-ke extract grouped by Parquet shard; one clip in memory at a time."""
+        """Anv-ke extract with one child process per clip so segfaults skip corrupt audio only."""
         feat_dir.mkdir(parents=True, exist_ok=True)
-        parquet_by_path: dict[str, list[tuple[int, dict[str, Any]]]] = {}
-        other_rows: list[tuple[int, dict[str, Any]]] = []
+        print(
+            f"  extracting with isolated workers, {len(indexed_rows)} clips "
+            f"(resume in parent, decode in child)"
+        )
 
-        for index, row in indexed_rows:
-            if row.get("audio_source", {}).get("type") == "parquet":
-                path = str(row["audio_source"]["path"])
-                parquet_by_path.setdefault(path, []).append((index, row))
-            else:
-                other_rows.append((index, row))
-
-        print(f"  extracting sequentially, {len(indexed_rows)} clips")
         batch_results: list[ExtractResult] = []
+        executor: ProcessPoolExecutor | None = None
         with tqdm(total=len(indexed_rows), desc=f"  {label}") as progress:
-            for index, row in other_rows:
-                processed, skip_reason = _extract_feature_row(row, feat_dir)
-                batch_results.append((index, processed, skip_reason))
+            for index, row in indexed_rows:
+                out_path = _feature_out_path(row, feat_dir)
+                if out_path is not None and out_path.is_file() and out_path.stat().st_size > 0:
+                    batch_results.append(_resumed_feature_result(index, row, out_path))
+                    progress.update(1)
+                    continue
+
+                result, executor = _extract_indexed_row_isolated(index, row, feat_dir, executor)
+                batch_results.append(result)
                 progress.update(1)
 
-            for path_str in sorted(parquet_by_path):
-                items = parquet_by_path[path_str]
-                batch_results.extend(_extract_parquet_file_rows(Path(path_str), items, feat_dir))
-                progress.update(len(items))
+        if executor is not None:
+            executor.shutdown(wait=True)
 
         return self._collect_results(batch_results)
 
