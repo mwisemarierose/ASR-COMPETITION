@@ -61,10 +61,19 @@ class ParquetFilterStats:
         }
 
 
-def _make_parquet_key(recorder_id: str | None, parquet_path: Path, row_index: int) -> str:
+def _make_parquet_key(
+    recorder_id: str | None,
+    parquet_path: Path,
+    row_index: int,
+    media_path_id: str | None = None,
+) -> str:
+    """Build a unique clip key. Never use recorder_uuid alone — speakers have many clips."""
+    if media_path_id:
+        return str(media_path_id)
+    clip_id = f"{parquet_path.stem}_{row_index:06d}"
     if recorder_id:
-        return recorder_id
-    return f"{parquet_path.stem}_{row_index:06d}"
+        return f"{recorder_id}_{clip_id}"
+    return clip_id
 
 
 def _process_parquet_shard(
@@ -94,6 +103,9 @@ def _process_parquet_shard(
         columns.append(text_col)
     if id_col:
         columns.append(id_col)
+    for extra_id_col in ("mediaPathId", "media_path_id"):
+        if extra_id_col in schema_names and extra_id_col not in columns:
+            columns.append(extra_id_col)
 
     table = pq.read_table(path, columns=columns)
     stats = ParquetFilterStats()
@@ -112,12 +124,21 @@ def _process_parquet_shard(
             continue
 
         recorder_id = None
+        media_path_id = None
         if id_col:
             recorder_id = table.column(id_col)[row_index].as_py()
             if recorder_id is not None:
                 recorder_id = str(recorder_id).strip()
+        if "mediaPathId" in schema_names:
+            value = table.column("mediaPathId")[row_index].as_py()
+            if value is not None:
+                media_path_id = str(value).strip()
+        elif "media_path_id" in schema_names:
+            value = table.column("media_path_id")[row_index].as_py()
+            if value is not None:
+                media_path_id = str(value).strip()
 
-        meta = meta_table.get(recorder_id or "", {}) if recorder_id else {}
+        meta = meta_table.get(recorder_id or media_path_id or "", {}) if (recorder_id or media_path_id) else {}
         transcript = ""
         if text_col:
             value = table.column(text_col)[row_index].as_py()
@@ -149,7 +170,7 @@ def _process_parquet_shard(
             stats.too_long += 1
             continue
 
-        key = _make_parquet_key(recorder_id, path, row_index)
+        key = _make_parquet_key(recorder_id, path, row_index, media_path_id)
         if key in seen_keys:
             stats.duplicate_key += 1
             continue
@@ -715,7 +736,8 @@ class CleaningPipeline:
         print(
             f"  kept: {report['kept']}/{report['input_rows']} "
             f"(empty={stats['empty_transcript']}, missing_audio={stats['missing_audio']}, "
-            f"corrupt={stats['corrupt_audio']}, too_short={stats['too_short']})"
+            f"corrupt={stats['corrupt_audio']}, too_short={stats['too_short']}, "
+            f"too_long={stats['too_long']}, dup={stats['duplicate_key']})"
         )
         print(f"  manifest: {report['output_manifest']}")
 
