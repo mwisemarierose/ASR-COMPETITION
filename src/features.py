@@ -17,7 +17,7 @@ from .config import (
     ANV_BATCH_TIMEOUT_SEC,
     ANV_CLIPS_PER_BATCH,
     ANV_EXTRACT_MAX_WORKERS,
-    ANV_ISOLATED_BATCH_SIZE,
+    ANV_SHARD_CHUNK_SIZE,
     N_MELS,
     PipelineConfig,
 )
@@ -82,6 +82,53 @@ def _extract_indexed_row_isolated(
             if retried:
                 return (index, None, "corrupt_audio"), executor
             retried = True
+
+
+def _serialize_indexed_rows(items: list[tuple[int, dict[str, Any]]]) -> str:
+    return json.dumps([[index, row] for index, row in items], ensure_ascii=False)
+
+
+def _deserialize_indexed_rows(payload: str) -> list[tuple[int, dict[str, Any]]]:
+    return [(int(index), row) for index, row in json.loads(payload)]
+
+
+def _extract_anv_work_unit(
+    unit_kind: str,
+    path: str,
+    items_json: str,
+    feat_dir: str,
+) -> list[ExtractResult]:
+    """Decode a Parquet shard chunk (or single row) inside one child process."""
+    items = _deserialize_indexed_rows(items_json)
+    out_dir = Path(feat_dir)
+    if unit_kind == "parquet":
+        return _extract_parquet_file_rows(Path(path), items, out_dir)
+
+    results: list[ExtractResult] = []
+    for index, row in items:
+        processed, skip_reason = _extract_feature_row(row, out_dir)
+        results.append((index, processed, skip_reason))
+    return results
+
+
+def _build_anv_work_units(
+    pending: list[tuple[int, dict[str, Any]]],
+    chunk_size: int,
+) -> list[tuple[str, str, list[tuple[int, dict[str, Any]]]]]:
+    units: list[tuple[str, str, list[tuple[int, dict[str, Any]]]]] = []
+    by_path: dict[str, list[tuple[int, dict[str, Any]]]] = {}
+
+    for index, row in pending:
+        audio_source = row.get("audio_source") or {}
+        if audio_source.get("type") != "parquet":
+            units.append(("row", "", [(index, row)]))
+            continue
+        by_path.setdefault(str(audio_source["path"]), []).append((index, row))
+
+    for path, items in sorted(by_path.items()):
+        for offset in range(0, len(items), chunk_size):
+            units.append(("parquet", path, items[offset : offset + chunk_size]))
+    return units
 
 
 def _extract_wav_row(row: dict[str, Any], feat_dir: Path) -> tuple[dict[str, Any] | None, str | None]:
@@ -342,7 +389,7 @@ class FeaturePipeline:
         indexed_rows: list[tuple[int, dict[str, Any]]],
         feat_dir: Path,
     ) -> tuple[list[dict[str, Any]], dict[str, int]]:
-        """Anv-ke extract: resume in parent; decode in batched child processes."""
+        """Anv-ke extract: resume in parent; decode Parquet shard chunks in child processes."""
         feat_dir.mkdir(parents=True, exist_ok=True)
         workers = min(max(1, self.config.workers), ANV_EXTRACT_MAX_WORKERS, len(indexed_rows))
 
@@ -357,39 +404,74 @@ class FeaturePipeline:
 
         print(
             f"  extracting {len(pending)} clip(s) with {workers} worker(s), "
-            f"batch size {ANV_ISOLATED_BATCH_SIZE} "
-            f"({len(batch_results)} resumed; failed batches retry one-at-a-time)"
+            f"shard chunk size {ANV_SHARD_CHUNK_SIZE} "
+            f"({len(batch_results)} resumed)"
         )
 
-        failed_clips: list[tuple[int, dict[str, Any]]] = []
-        if pending:
-            batches = [
-                pending[offset : offset + ANV_ISOLATED_BATCH_SIZE]
-                for offset in range(0, len(pending), ANV_ISOLATED_BATCH_SIZE)
-            ]
-            feat_dir_str = str(feat_dir)
+        work_units = _build_anv_work_units(pending, ANV_SHARD_CHUNK_SIZE)
+        failed_units: list[tuple[str, str, list[tuple[int, dict[str, Any]]]]] = []
+        logged_errors = 0
+        feat_dir_str = str(feat_dir)
+
+        if work_units:
             with ProcessPoolExecutor(max_workers=workers, max_tasks_per_child=1) as executor:
-                future_to_batch = {
-                    executor.submit(_extract_feature_batch, batch, feat_dir_str): batch
-                    for batch in batches
+                future_to_unit = {
+                    executor.submit(
+                        _extract_anv_work_unit,
+                        unit_kind,
+                        path,
+                        _serialize_indexed_rows(chunk),
+                        feat_dir_str,
+                    ): (unit_kind, path, chunk)
+                    for unit_kind, path, chunk in work_units
                 }
                 with tqdm(total=len(indexed_rows), initial=len(batch_results), desc=f"  {label}") as progress:
-                    for future in as_completed(future_to_batch):
-                        batch = future_to_batch[future]
+                    for future in as_completed(future_to_unit):
+                        unit_kind, path, chunk = future_to_unit[future]
+                        try:
+                            batch_results.extend(future.result(timeout=ANV_BATCH_TIMEOUT_SEC))
+                        except Exception as exc:
+                            if logged_errors < 5:
+                                print(f"  ! shard chunk failed ({len(chunk)} clips): {exc}")
+                                logged_errors += 1
+                            if len(chunk) > 1:
+                                mid = len(chunk) // 2
+                                failed_units.append((unit_kind, path, chunk[:mid]))
+                                failed_units.append((unit_kind, path, chunk[mid:]))
+                            else:
+                                failed_units.append((unit_kind, path, chunk))
+                        progress.update(len(chunk))
+
+        while failed_units:
+            print(f"  retrying {sum(len(chunk) for _, _, chunk in failed_units)} clip(s) in smaller chunks...")
+            retry_units = failed_units
+            failed_units = []
+            with ProcessPoolExecutor(max_workers=1, max_tasks_per_child=1) as executor:
+                future_to_unit = {
+                    executor.submit(
+                        _extract_anv_work_unit,
+                        unit_kind,
+                        path,
+                        _serialize_indexed_rows(chunk),
+                        feat_dir_str,
+                    ): (unit_kind, path, chunk)
+                    for unit_kind, path, chunk in retry_units
+                }
+                with tqdm(total=len(retry_units), desc="  retry", leave=False) as progress:
+                    for future in as_completed(future_to_unit):
+                        unit_kind, path, chunk = future_to_unit[future]
                         try:
                             batch_results.extend(future.result(timeout=ANV_BATCH_TIMEOUT_SEC))
                         except Exception:
-                            failed_clips.extend(batch)
-                        progress.update(len(batch))
-
-        if failed_clips:
-            print(f"  retrying {len(failed_clips)} clip(s) in isolated child processes...")
-            executor: ProcessPoolExecutor | None = None
-            for index, row in failed_clips:
-                result, executor = _extract_indexed_row_isolated(index, row, feat_dir, executor)
-                batch_results.append(result)
-            if executor is not None:
-                executor.shutdown(wait=True)
+                            executor: ProcessPoolExecutor | None = None
+                            for index, row in chunk:
+                                result, executor = _extract_indexed_row_isolated(
+                                    index, row, feat_dir, executor
+                                )
+                                batch_results.append(result)
+                            if executor is not None:
+                                executor.shutdown(wait=True)
+                        progress.update(len(chunk))
 
         return self._collect_results(batch_results)
 
