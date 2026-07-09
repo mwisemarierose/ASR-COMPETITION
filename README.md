@@ -542,17 +542,33 @@ Kalenjin/
 └── dev_test/...          # some releases use dev_test instead of dev/test
 ```
 
+### Orchard layout
+
+On Orchard the languages live **flat** under one parent folder (no `Anv-ke/` subfolder):
+
+```text
+/project/community/rmwisene/datasets/
+├── Afrivoice_Swahili/     # Umuganda Swahili (--dataset-type afrivoice)
+├── Kalenjin/
+├── Dholuo/
+├── Kikuyu/
+├── Maasai/
+└── Somali/
+```
+
+Use the lowercase `--language` slug in commands; the pipeline resolves the capitalized folder name automatically.
+
 ### Orchard example (Kalenjin)
 
 ```bash
-export ANV_DATASET_ROOT=/project/community/rmwisene/datasets/Anv-ke
+export ANV_DATASET_ROOT=/project/community/rmwisene/datasets
 export WORK_DIR=/project/community/rmwisene/pipeline_outputs
 
 # Clean one split/style
 python run_pipeline.py \
   --dataset-type anv \
   --language kalenjin \
-  --dataset-root $ANV_DATASET_ROOT/Kalenjin \
+  --dataset-root $ANV_DATASET_ROOT \
   --work-dir $WORK_DIR \
   --split dev \
   --style unscripted \
@@ -572,13 +588,13 @@ python run_pipeline.py \
 
 ### Supported `--language` values
 
-| Slug | HuggingFace repo |
-|------|------------------|
-| `kalenjin` | Anv-ke/Kalenjin |
-| `dholuo` or `luo` | Anv-ke/Dholuo |
-| `kikuyu` | Anv-ke/Kikuyu |
-| `somali` | Anv-ke/Somali |
-| `maasai` | Anv-ke/Maasai |
+| Slug | On-disk folder |
+|------|----------------|
+| `kalenjin` | `Kalenjin/` |
+| `dholuo` or `luo` | `Dholuo/` |
+| `kikuyu` | `Kikuyu/` |
+| `somali` | `Somali/` |
+| `maasai` | `Maasai/` |
 
 ### Outputs
 

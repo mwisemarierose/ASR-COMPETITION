@@ -215,23 +215,45 @@ class PipelineConfig:
 
     # --- Anv-ke path helpers ---
 
+    def _resolve_anv_language_folder(self, parent: Path) -> Path | None:
+        if not parent.is_dir() or not self.language:
+            return None
+
+        for name in (self.language_name, self.language):
+            if not name:
+                continue
+            candidate = parent / name
+            if self._looks_like_language_root(candidate):
+                return candidate
+
+        for child in sorted(parent.iterdir()):
+            if not child.is_dir():
+                continue
+            if child.name.lower() == self.language and self._looks_like_language_root(child):
+                return child
+        return None
+
     def language_dataset_root(self) -> Path:
         direct = self.dataset_root.resolve()
         if self._looks_like_language_root(direct):
             return direct
-        if self.language and (
-            direct.name.lower() == self.language or direct.name == self.language_name
-        ):
+        if not self.language:
             return direct
-        if self.language:
-            by_slug = direct / self.language
-            if self._looks_like_language_root(by_slug):
-                return by_slug
-            by_name = direct / self.language_name
-            if self._looks_like_language_root(by_name):
-                return by_name
-            return by_name
-        return direct
+
+        if direct.name.lower() == self.language or direct.name == self.language_name:
+            resolved = self._resolve_anv_language_folder(direct.parent)
+            if resolved is not None:
+                return resolved
+            if self.language_name and (direct.parent / self.language_name).is_dir():
+                return direct.parent / self.language_name
+            return direct
+
+        resolved = self._resolve_anv_language_folder(direct)
+        if resolved is not None:
+            return resolved
+        if self.language_name:
+            return direct / self.language_name
+        return direct / self.language
 
     @staticmethod
     def _looks_like_language_root(path: Path) -> bool:

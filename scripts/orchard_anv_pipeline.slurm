@@ -27,7 +27,7 @@ SPLIT="${2:-}"
 STYLE="${3:-}"
 STEP="${4:-}"
 
-export ANV_DATASET_ROOT=/project/community/rmwisene/datasets/Anv-ke
+export ANV_DATASET_ROOT=/project/community/rmwisene/datasets
 export WORK_DIR=/project/community/rmwisene/pipeline_outputs
 
 # Map language slug -> on-disk folder name

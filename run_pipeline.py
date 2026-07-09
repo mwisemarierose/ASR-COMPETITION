@@ -16,6 +16,7 @@ from src.config import (
     ANV_LANGUAGES,
     ANV_STYLES,
     DEFAULT_AFRIVOICE_MULTILANG_ROOT,
+    DEFAULT_ANV_DATASET_ROOT,
     DEFAULT_DATASET_ROOT,
     DOMAINS,
     SPLITS,
@@ -69,7 +70,7 @@ def build_config(args: argparse.Namespace) -> PipelineConfig:
     dataset_root = args.dataset_root
     if dataset_root is None:
         if args.dataset_type == "anv":
-            dataset_root = DEFAULT_AFRIVOICE_MULTILANG_ROOT
+            dataset_root = DEFAULT_ANV_DATASET_ROOT
         elif args.language and args.language != "swahili":
             dataset_root = DEFAULT_AFRIVOICE_MULTILANG_ROOT
         else:
