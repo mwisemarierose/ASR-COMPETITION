@@ -56,8 +56,16 @@ class ManifestChunkLoader:
         return total
 
 
-def _normalize_csv_key(name: str) -> str:
+def _normalize_csv_key(name: str | None) -> str:
+    if not name:
+        return ""
     return name.strip().lower().replace(" ", "_")
+
+
+def _csv_cell_value(value: str | None) -> str:
+    if value is None:
+        return ""
+    return value.strip()
 
 
 def _csv_row_lookup_key(row: dict[str, str]) -> str | None:
@@ -80,10 +88,14 @@ def load_csv_table(path: Path) -> dict[str, dict[str, str]]:
 
         table: dict[str, dict[str, str]] = {}
         for raw_row in reader:
-            row = {
-                _normalize_csv_key(key): (value or "").strip()
-                for key, value in raw_row.items()
-            }
+            row: dict[str, str] = {}
+            for key, value in raw_row.items():
+                if key is None:
+                    continue
+                norm_key = _normalize_csv_key(key)
+                if not norm_key:
+                    continue
+                row[norm_key] = _csv_cell_value(value)
             lookup = _csv_row_lookup_key(row)
             if lookup:
                 table[lookup] = row

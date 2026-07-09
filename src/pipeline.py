@@ -135,17 +135,17 @@ def _process_parquet_shard(
             except (TypeError, ValueError):
                 duration_sec = None
 
-        if verify_audio or duration_sec is None:
+        if duration_sec is None and verify_audio:
             try:
                 duration_sec = duration_from_audio_bytes(audio_bytes)
             except Exception:
                 stats.corrupt_audio += 1
                 continue
 
-        if duration_sec < min_duration_sec:
+        if duration_sec is not None and duration_sec < min_duration_sec:
             stats.too_short += 1
             continue
-        if max_duration_sec is not None and duration_sec > max_duration_sec:
+        if duration_sec is not None and max_duration_sec is not None and duration_sec > max_duration_sec:
             stats.too_long += 1
             continue
 
