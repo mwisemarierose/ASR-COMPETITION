@@ -20,6 +20,9 @@ PARQUET_AUDIO_COLUMNS = ("audio", "bytes", "audio_bytes")
 PARQUET_TEXT_COLUMNS = ("transcription", "transcript", "text", "sentence")
 PARQUET_ID_COLUMNS = ("recorder_uuid", "mediaPathId", "media_path_id", "id", "key")
 
+# Per-worker cache: parquet path -> audio column name (schema probe once per file)
+_PARQUET_AUDIO_COL_CACHE: dict[str, str] = {}
+
 
 def _frame_to_mono_float32(frame: av.AudioFrame) -> np.ndarray:
     audio = frame.to_ndarray()
@@ -148,19 +151,42 @@ def load_parquet_row_audio(
     row_index: int,
     sample_rate: int = SAMPLE_RATE,
 ) -> np.ndarray:
+    """Load one clip. Reads a single row group when possible (not the whole file)."""
     audio_col = _resolve_parquet_audio_column(parquet_path)
-    table = pq.read_table(parquet_path, columns=[audio_col])
-    audio_value = table.column(0)[row_index].as_py()
-    audio_bytes = audio_bytes_from_struct(audio_value)
-    if not audio_bytes:
-        raise RuntimeError(f"Missing audio bytes at {parquet_path}:{row_index}")
-    return _decode_audio_bytes(audio_bytes, sample_rate=sample_rate)
+    pf = pq.ParquetFile(parquet_path)
+
+    cumulative = 0
+    for rg in range(pf.num_row_groups):
+        n_rows = pf.metadata.row_group(rg).num_rows
+        if row_index < cumulative + n_rows:
+            local_idx = row_index - cumulative
+            table = pf.read_row_group(rg, columns=[audio_col])
+            audio_value = table.column(0)[local_idx].as_py()
+            audio_bytes = audio_bytes_from_struct(audio_value)
+            if not audio_bytes:
+                raise RuntimeError(f"Missing audio bytes at {parquet_path}:{row_index}")
+            return _decode_audio_bytes(audio_bytes, sample_rate=sample_rate)
+        cumulative += n_rows
+
+    raise RuntimeError(f"Row {row_index} out of range for {parquet_path}")
+
+
+def load_parquet_audio_column(parquet_path: Path):
+    """Load the full audio column from a shard (use when processing many rows)."""
+    audio_col = _resolve_parquet_audio_column(parquet_path)
+    return pq.read_table(parquet_path, columns=[audio_col]).column(0)
 
 
 def _resolve_parquet_audio_column(parquet_path: Path) -> str:
+    key = str(parquet_path.resolve())
+    cached = _PARQUET_AUDIO_COL_CACHE.get(key)
+    if cached:
+        return cached
+
     schema_names = pq.read_schema(parquet_path).names
     for candidate in PARQUET_AUDIO_COLUMNS:
         if candidate in schema_names:
+            _PARQUET_AUDIO_COL_CACHE[key] = candidate
             return candidate
     raise RuntimeError(f"No audio column found in {parquet_path}; columns={schema_names}")
 

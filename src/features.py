@@ -12,7 +12,12 @@ import numpy as np
 import pandas as pd
 from tqdm import tqdm
 
-from .audio_utils import load_parquet_row_audio
+from .audio_utils import (
+    _decode_audio_bytes,
+    audio_bytes_from_struct,
+    load_parquet_audio_column,
+    load_parquet_row_audio,
+)
 from .config import N_MELS, PipelineConfig
 from .mel_features import audio_to_log_mel, wav_path_to_log_mel
 
@@ -85,6 +90,73 @@ def _extract_feature_row(row: dict[str, Any], feat_dir: Path) -> tuple[dict[str,
     return None, "missing_audio"
 
 
+def _extract_parquet_file_rows(
+    parquet_path: Path,
+    items: list[tuple[int, dict[str, Any]]],
+    feat_dir: Path,
+) -> list[ExtractResult]:
+    """Process many manifest rows from one parquet shard with a single column read."""
+    results: list[ExtractResult] = []
+    pending: list[tuple[int, dict[str, Any], int, Path]] = []
+
+    for index, row in items:
+        row_index = int(row["audio_source"]["row"])
+        out_path = feat_dir / f"{row.get('key', f'{parquet_path.stem}_{row_index:06d}')}.npy"
+
+        if out_path.is_file() and out_path.stat().st_size > 0:
+            processed = dict(row)
+            processed["feature_path"] = str(out_path.resolve())
+            if "feature_shape" not in processed:
+                processed["feature_shape"] = row.get("feature_shape", "")
+            results.append((index, processed, "resumed"))
+            continue
+
+        if not parquet_path.is_file():
+            results.append((index, None, "missing_audio"))
+            continue
+
+        pending.append((index, row, row_index, out_path))
+
+    if not pending:
+        return results
+
+    # One parquet read per batch of rows from the same shard (manifest is sorted by path).
+    if len(pending) >= 4:
+        try:
+            audio_column = load_parquet_audio_column(parquet_path)
+            for index, row, row_index, out_path in pending:
+                try:
+                    audio_bytes = audio_bytes_from_struct(audio_column[row_index].as_py())
+                    if not audio_bytes:
+                        results.append((index, None, "missing_audio"))
+                        continue
+                    mel = audio_to_log_mel(_decode_audio_bytes(audio_bytes))
+                    np.save(out_path, mel)
+                    processed = dict(row)
+                    processed["feature_path"] = str(out_path.resolve())
+                    processed["feature_shape"] = str(list(mel.shape))
+                    results.append((index, processed, None))
+                except Exception:
+                    results.append((index, None, "corrupt_audio"))
+            return results
+        except Exception:
+            pass  # fall back to per-row reads
+
+    for index, row, row_index, out_path in pending:
+        try:
+            audio = load_parquet_row_audio(parquet_path, row_index)
+            mel = audio_to_log_mel(audio)
+            np.save(out_path, mel)
+            processed = dict(row)
+            processed["feature_path"] = str(out_path.resolve())
+            processed["feature_shape"] = str(list(mel.shape))
+            results.append((index, processed, None))
+        except Exception:
+            results.append((index, None, "corrupt_audio"))
+
+    return results
+
+
 def _extract_feature_batch(
     batch: list[tuple[int, dict[str, Any]]],
     feat_dir: str,
@@ -92,9 +164,19 @@ def _extract_feature_batch(
     out_dir = Path(feat_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     results: list[ExtractResult] = []
+
+    parquet_by_path: dict[str, list[tuple[int, dict[str, Any]]]] = {}
     for index, row in batch:
+        if row.get("audio_source", {}).get("type") == "parquet":
+            path = str(row["audio_source"]["path"])
+            parquet_by_path.setdefault(path, []).append((index, row))
+            continue
         processed, skip_reason = _extract_feature_row(row, out_dir)
         results.append((index, processed, skip_reason))
+
+    for path_str, items in parquet_by_path.items():
+        results.extend(_extract_parquet_file_rows(Path(path_str), items, out_dir))
+
     return results
 
 
