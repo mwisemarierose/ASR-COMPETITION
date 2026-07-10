@@ -132,6 +132,24 @@ def _build_anv_work_units(
     return units
 
 
+def _run_anv_unit_in_child(
+    unit_kind: str,
+    path: str,
+    chunk: list[tuple[int, dict[str, Any]]],
+    feat_dir_str: str,
+) -> list[ExtractResult]:
+    """Fresh child process per chunk so a crash cannot poison the process pool."""
+    with ProcessPoolExecutor(max_workers=1, max_tasks_per_child=1) as executor:
+        future = executor.submit(
+            _extract_anv_work_unit,
+            unit_kind,
+            path,
+            _serialize_indexed_rows(chunk),
+            feat_dir_str,
+        )
+        return future.result(timeout=ANV_BATCH_TIMEOUT_SEC)
+
+
 def _extract_wav_row(row: dict[str, Any], feat_dir: Path) -> tuple[dict[str, Any] | None, str | None]:
     wav = Path(row["audio_path"])
     if not wav.is_file():
@@ -445,28 +463,22 @@ class FeaturePipeline:
         retry_units: list[tuple[str, str, list[tuple[int, dict[str, Any]]]]] = []
 
         if work_units:
-            with ProcessPoolExecutor(max_workers=workers, max_tasks_per_child=1) as executor:
-                with tqdm(total=len(indexed_rows), initial=len(batch_results), desc=f"  {label}") as progress:
-                    for unit_kind, path, chunk in work_units:
-                        try:
-                            future = executor.submit(
-                                _extract_anv_work_unit,
-                                unit_kind,
-                                path,
-                                _serialize_indexed_rows(chunk),
-                                feat_dir_str,
-                            )
-                            batch_results.extend(future.result(timeout=ANV_BATCH_TIMEOUT_SEC))
-                        except Exception as exc:
-                            if logged_errors < 5:
-                                print(f"  ! shard chunk failed ({len(chunk)} clips): {exc}")
-                                logged_errors += 1
-                            extra, isolate_executor, retry_units_add = _split_or_isolate(
-                                unit_kind, path, chunk, isolate_executor
-                            )
-                            batch_results.extend(extra)
-                            retry_units.extend(retry_units_add)
-                        progress.update(len(chunk))
+            with tqdm(total=len(indexed_rows), initial=len(batch_results), desc=f"  {label}") as progress:
+                for unit_kind, path, chunk in work_units:
+                    try:
+                        batch_results.extend(
+                            _run_anv_unit_in_child(unit_kind, path, chunk, feat_dir_str)
+                        )
+                    except Exception as exc:
+                        if logged_errors < 5:
+                            print(f"  ! shard chunk failed ({len(chunk)} clips): {exc}")
+                            logged_errors += 1
+                        extra, isolate_executor, retry_units_add = _split_or_isolate(
+                            unit_kind, path, chunk, isolate_executor
+                        )
+                        batch_results.extend(extra)
+                        retry_units.extend(retry_units_add)
+                    progress.update(len(chunk))
 
         while retry_units:
             print(
@@ -474,25 +486,19 @@ class FeaturePipeline:
                 f"in smaller chunks..."
             )
             next_retry: list[tuple[str, str, list[tuple[int, dict[str, Any]]]]] = []
-            with ProcessPoolExecutor(max_workers=1, max_tasks_per_child=1) as executor:
-                with tqdm(total=len(retry_units), desc="  retry", leave=False) as progress:
-                    for unit_kind, path, chunk in retry_units:
-                        try:
-                            future = executor.submit(
-                                _extract_anv_work_unit,
-                                unit_kind,
-                                path,
-                                _serialize_indexed_rows(chunk),
-                                feat_dir_str,
-                            )
-                            batch_results.extend(future.result(timeout=ANV_BATCH_TIMEOUT_SEC))
-                        except Exception:
-                            extra, isolate_executor, retry_units_add = _split_or_isolate(
-                                unit_kind, path, chunk, isolate_executor
-                            )
-                            batch_results.extend(extra)
-                            next_retry.extend(retry_units_add)
-                        progress.update(1)
+            with tqdm(total=len(retry_units), desc="  retry", leave=False) as progress:
+                for unit_kind, path, chunk in retry_units:
+                    try:
+                        batch_results.extend(
+                            _run_anv_unit_in_child(unit_kind, path, chunk, feat_dir_str)
+                        )
+                    except Exception:
+                        extra, isolate_executor, retry_units_add = _split_or_isolate(
+                            unit_kind, path, chunk, isolate_executor
+                        )
+                        batch_results.extend(extra)
+                        next_retry.extend(retry_units_add)
+                    progress.update(1)
             retry_units = next_retry
 
         if isolate_executor is not None:
