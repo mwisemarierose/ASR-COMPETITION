@@ -17,6 +17,9 @@ __pycache__/
 venv/
 .bin/
 
+# Secrets (never commit API keys)
+scripts/orchard_secrets.sh
+
 # OS / editor
 .DS_Store
 .idea/

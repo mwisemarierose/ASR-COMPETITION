@@ -24,9 +24,13 @@ export TOKENIZERS_PARALLELISM=false
 
 export WANDB_PROJECT="${WANDB_PROJECT:-asr-competition}"
 export WANDB_RUN_GROUP="${WANDB_RUN_GROUP:-multilingual-one-model}"
-# Only WANDB_API_KEY is required. Do NOT set WANDB_ENTITY unless you know the exact team slug.
+# W&B is optional. Key is loaded from gitignored scripts/orchard_secrets.sh if present.
 unset WANDB_ENTITY
-# export WANDB_API_KEY="..."
+SECRETS_FILE="$(dirname "$0")/orchard_secrets.sh"
+if [[ -f "$SECRETS_FILE" ]]; then
+  # shellcheck source=/dev/null
+  source "$SECRETS_FILE"
+fi
 
 BALANCE="${BALANCE:-cap}"
 MAX_PER_LANGUAGE="${MAX_PER_LANGUAGE:-80000}"
