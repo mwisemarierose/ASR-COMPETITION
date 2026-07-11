@@ -216,10 +216,7 @@ def resolve_report_to(report_to: list[str]) -> list[str]:
 
 
 def configure_wandb_env(args: argparse.Namespace, output_dir: Path) -> None:
-    if "wandb" not in args.report_to:
-        return
     os.environ.setdefault("WANDB_PROJECT", args.wandb_project)
-    # Avoid invalid entity crashes; only set when passed explicitly via --wandb-entity.
     if args.wandb_entity:
         os.environ["WANDB_ENTITY"] = args.wandb_entity
     else:
@@ -231,31 +228,80 @@ def configure_wandb_env(args: argparse.Namespace, output_dir: Path) -> None:
     os.environ.setdefault("WANDB_LOG_MODEL", "false")
 
 
+def split_report_to(report_to: list[str]) -> tuple[bool, list[str]]:
+    """Keep wandb out of HuggingFace report_to; we log to wandb via SafeWandbCallback."""
+    if "none" in report_to:
+        return False, []
+    want_wandb = "wandb" in report_to
+    trainer_report_to = [backend for backend in report_to if backend != "wandb"]
+    return want_wandb, trainer_report_to
+
+
 def log_to_wandb(metrics: dict[str, float]) -> None:
     if not metrics:
         return
     try:
         import wandb
-    except ImportError:
-        return
-    if wandb.run is None:
-        return
-    wandb.log(metrics)
+
+        if wandb.run is not None:
+            wandb.log(metrics)
+    except Exception as exc:
+        print(f"WARNING: wandb log failed ({exc})", file=sys.stderr)
 
 
-class WandbDatasetCallback(TrainerCallback):
-    """Log dataset summary to wandb once training starts."""
+class SafeWandbCallback(TrainerCallback):
+    """Optional wandb logging that never raises — training always continues."""
 
-    def __init__(self, config: dict[str, Any]) -> None:
-        self.config = config
+    def __init__(self, args: argparse.Namespace, output_dir: Path, run_config: dict[str, Any]) -> None:
+        self.args = args
+        self.output_dir = output_dir
+        self.run_config = run_config
+        self.active = False
 
     def on_train_begin(self, args, state, control, **kwargs):
         try:
             import wandb
         except ImportError:
+            print("WARNING: wandb not installed; training continues without wandb.", file=sys.stderr)
             return
-        if wandb.run is not None:
-            wandb.config.update(self.config)
+        configure_wandb_env(self.args, self.output_dir)
+        try:
+            run = wandb.init(
+                project=self.args.wandb_project,
+                entity=self.args.wandb_entity,
+                name=self.args.wandb_run_name or self.output_dir.name,
+                group=self.args.wandb_group,
+                config=self.run_config,
+                mode="online",
+            )
+            self.active = run is not None
+            if self.active and wandb.run is not None and getattr(wandb.run, "url", None):
+                print(f"wandb: {wandb.run.url}")
+        except Exception as exc:
+            self.active = False
+            print(f"WARNING: wandb init failed ({exc}); training continues without wandb.", file=sys.stderr)
+
+    def on_log(self, args, state, control, logs=None, **kwargs):
+        if not self.active or not logs:
+            return
+        try:
+            import wandb
+
+            if wandb.run is not None:
+                wandb.log(logs, step=state.global_step)
+        except Exception as exc:
+            print(f"WARNING: wandb log failed ({exc})", file=sys.stderr)
+
+    def on_train_end(self, args, state, control, **kwargs):
+        if not self.active:
+            return
+        try:
+            import wandb
+
+            if wandb.run is not None:
+                wandb.finish(quiet=True)
+        except Exception:
+            pass
 
 
 def records_to_dataset(records: list[TrainingRecord]) -> Dataset:
@@ -331,14 +377,7 @@ def main() -> int:
         print("ERROR: no train records found.", file=sys.stderr)
         return 1
 
-    configure_wandb_env(args, output_dir)
-    report_to = resolve_report_to(args.report_to)
-    if "wandb" in report_to:
-        try:
-            import wandb  # noqa: F401
-        except ImportError:
-            print("WARNING: wandb not installed; remove 'wandb' from --report-to or pip install wandb", file=sys.stderr)
-            report_to = [backend for backend in report_to if backend != "wandb"]
+    want_wandb, trainer_report_to = split_report_to(resolve_report_to(args.report_to))
 
     processor = WhisperProcessor.from_pretrained(args.model_name)
     model = WhisperForConditionalGeneration.from_pretrained(args.model_name)
@@ -391,7 +430,7 @@ def main() -> int:
         load_best_model_at_end=eval_ds is not None,
         metric_for_best_model="wer",
         greater_is_better=False,
-        report_to=report_to,
+        report_to=trainer_report_to,
         run_name=args.wandb_run_name or output_dir.name,
         push_to_hub=False,
     )
@@ -404,13 +443,14 @@ def main() -> int:
         "eval_languages": summarize_records(eval_records),
         "swahili_domains": args.swahili_domains,
         "anv_languages": args.anv_languages,
-        "learning_rate": args.learning_rate,
-        "per_device_train_batch_size": args.per_device_train_batch_size,
-        "gradient_accumulation_steps": args.gradient_accumulation_steps,
-        "max_steps": args.max_steps,
+        "balance_languages": args.balance_languages,
+        "max_samples_per_language": args.max_samples_per_language,
+        "max_steps": max_steps,
         "num_train_epochs": args.num_train_epochs,
     }
-    callbacks = [WandbDatasetCallback(run_config)] if "wandb" in report_to else []
+    callbacks: list[TrainerCallback] = []
+    if want_wandb:
+        callbacks.append(SafeWandbCallback(args, output_dir, run_config))
 
     trainer = Seq2SeqTrainer(
         args=training_args,
