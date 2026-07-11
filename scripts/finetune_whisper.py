@@ -39,6 +39,9 @@ from transformers import (
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
+# Whisper decoder max target length (model rejects longer label sequences).
+WHISPER_MAX_LABEL_LENGTH = 448
+
 from src.config import DOMAINS, SAMPLE_RATE  # noqa: E402
 from src.whisper_dataset import (  # noqa: E402
     COMPETITION_ANV_LANGUAGES,
@@ -67,6 +70,7 @@ class DataCollatorSpeechSeq2SeqWithPadding:
     """Load audio lazily per batch so full multilingual training does not cache every clip."""
 
     processor: WhisperProcessor
+    truncated_label_count: int = 0
 
     def __call__(self, features: list[dict[str, Any]]) -> dict[str, torch.Tensor]:
         input_features: list[dict[str, Any]] = []
@@ -82,6 +86,15 @@ class DataCollatorSpeechSeq2SeqWithPadding:
                 sampling_rate=audio["sampling_rate"],
             ).input_features[0]
             labels = self.processor.tokenizer(record.sentence).input_ids
+            if len(labels) > WHISPER_MAX_LABEL_LENGTH:
+                self.truncated_label_count += 1
+                if self.truncated_label_count <= 20 or self.truncated_label_count % 100 == 0:
+                    print(
+                        f"WARNING: truncating long transcript ({self.truncated_label_count} total) "
+                        f"key={record.key} tokens={len(labels)} -> {WHISPER_MAX_LABEL_LENGTH}",
+                        flush=True,
+                    )
+                labels = labels[:WHISPER_MAX_LABEL_LENGTH]
             input_features.append({"input_features": feats})
             label_features.append({"input_ids": labels})
 
@@ -97,6 +110,9 @@ class DataCollatorSpeechSeq2SeqWithPadding:
 
         if labels.shape[1] > 0 and (labels[:, 0] == self.processor.tokenizer.bos_token_id).all().cpu().item():
             labels = labels[:, 1:]
+
+        if labels.shape[1] > WHISPER_MAX_LABEL_LENGTH:
+            labels = labels[:, :WHISPER_MAX_LABEL_LENGTH]
 
         batch["labels"] = labels
         return batch
@@ -461,12 +477,13 @@ def main() -> int:
     if want_wandb:
         callbacks.append(SafeWandbCallback(args, output_dir, run_config))
 
+    collator = DataCollatorSpeechSeq2SeqWithPadding(processor)
     trainer = Seq2SeqTrainer(
         args=training_args,
         model=model,
         train_dataset=train_ds,
         eval_dataset=eval_ds,
-        data_collator=DataCollatorSpeechSeq2SeqWithPadding(processor),
+        data_collator=collator,
         compute_metrics=compute_metrics if eval_ds is not None else None,
         processing_class=processor,
         callbacks=callbacks,
@@ -477,6 +494,11 @@ def main() -> int:
     skipped = audio_skip_count()
     if skipped:
         print(f"Training skipped {skipped} corrupt/unreadable audio clip(s).")
+    if collator.truncated_label_count:
+        print(
+            f"Training truncated {collator.truncated_label_count} transcript(s) "
+            f"to {WHISPER_MAX_LABEL_LENGTH} tokens."
+        )
 
     if eval_ds is not None:
         overall = trainer.evaluate()
