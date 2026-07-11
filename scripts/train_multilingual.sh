@@ -66,7 +66,7 @@ python scripts/finetune_whisper.py \
   --work-dir "$WORK_DIR" \
   --output-dir "$OUTPUT_DIR" \
   --model-name openai/whisper-small \
-  --num-train-epochs 1 \
+  --num-train-epochs 3 \
   --learning-rate 1e-5 \
   --warmup-steps 1000 \
   --per-device-train-batch-size 8 \
