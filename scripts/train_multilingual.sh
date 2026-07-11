@@ -24,7 +24,8 @@ export TOKENIZERS_PARALLELISM=false
 
 export WANDB_PROJECT="${WANDB_PROJECT:-asr-competition}"
 export WANDB_RUN_GROUP="${WANDB_RUN_GROUP:-multilingual-one-model}"
-# export WANDB_ENTITY="your-wandb-username"
+# Only WANDB_API_KEY is required. Do NOT set WANDB_ENTITY unless you know the exact team slug.
+unset WANDB_ENTITY
 # export WANDB_API_KEY="..."
 
 BALANCE="${BALANCE:-cap}"
@@ -77,7 +78,7 @@ python scripts/finetune_whisper.py \
   --save-steps 2000 \
   --logging-steps 50 \
   --save-total-limit 3 \
-  --dataloader-num-workers 4 \
+  --dataloader-num-workers 0 \
   --report-to wandb tensorboard \
   --wandb-project "$WANDB_PROJECT" \
   --wandb-group "$WANDB_RUN_GROUP" \

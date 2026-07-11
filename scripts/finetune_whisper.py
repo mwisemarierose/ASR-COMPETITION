@@ -191,8 +191,8 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--wandb-entity",
-        default=os.environ.get("WANDB_ENTITY"),
-        help="Weights & Biases team/user (optional).",
+        default=None,
+        help="Weights & Biases team/user (optional; leave unset to use API key default).",
     )
     parser.add_argument(
         "--wandb-group",
@@ -219,8 +219,11 @@ def configure_wandb_env(args: argparse.Namespace, output_dir: Path) -> None:
     if "wandb" not in args.report_to:
         return
     os.environ.setdefault("WANDB_PROJECT", args.wandb_project)
+    # Avoid invalid entity crashes; only set when passed explicitly via --wandb-entity.
     if args.wandb_entity:
         os.environ["WANDB_ENTITY"] = args.wandb_entity
+    else:
+        os.environ.pop("WANDB_ENTITY", None)
     if args.wandb_group:
         os.environ["WANDB_RUN_GROUP"] = args.wandb_group
     run_name = args.wandb_run_name or output_dir.name
@@ -374,6 +377,7 @@ def main() -> int:
         num_train_epochs=args.num_train_epochs,
         eval_strategy="steps" if eval_ds is not None else "no",
         eval_steps=args.eval_steps if eval_ds is not None else None,
+        save_strategy="steps",
         save_steps=args.save_steps,
         logging_steps=args.logging_steps,
         save_total_limit=args.save_total_limit,
