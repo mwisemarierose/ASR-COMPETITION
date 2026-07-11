@@ -168,6 +168,47 @@ def collect_records(
     return records
 
 
+def balance_records_by_language(
+    records: list[TrainingRecord],
+    mode: str = "equal",
+    max_per_language: int | None = None,
+    seed: int = 42,
+) -> list[TrainingRecord]:
+    """
+    Rebalance train data so no single language dominates mixed batches.
+
+    - equal: use the same count from every language (smallest language size)
+    - cap: use at most max_per_language clips per language
+    - none: return records unchanged
+    """
+    if mode == "none" or not records:
+        return records
+
+    by_language: dict[str, list[TrainingRecord]] = {}
+    for record in records:
+        by_language.setdefault(record.language, []).append(record)
+
+    if mode == "equal":
+        cap = min(len(rows) for rows in by_language.values())
+    elif mode == "cap":
+        if max_per_language is None:
+            raise ValueError("max_per_language is required when balance_languages=cap")
+        cap = max_per_language
+    else:
+        raise ValueError(f"Unknown balance_languages mode: {mode}")
+
+    rng = random.Random(seed)
+    balanced: list[TrainingRecord] = []
+    for language in sorted(by_language):
+        rows = by_language[language]
+        if len(rows) <= cap:
+            balanced.extend(rows)
+        else:
+            balanced.extend(rng.sample(rows, cap))
+    rng.shuffle(balanced)
+    return balanced
+
+
 def load_record_audio(record: TrainingRecord, sample_rate: int = SAMPLE_RATE) -> dict[str, Any]:
     if record.audio_path:
         array = load_audio_mono(Path(record.audio_path), sample_rate=sample_rate)

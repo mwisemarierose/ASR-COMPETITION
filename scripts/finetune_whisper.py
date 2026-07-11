@@ -31,6 +31,7 @@ from datasets import Dataset
 from transformers import (
     Seq2SeqTrainer,
     Seq2SeqTrainingArguments,
+    TrainerCallback,
     WhisperForConditionalGeneration,
     WhisperProcessor,
 )
@@ -42,6 +43,7 @@ from src.config import DOMAINS, SAMPLE_RATE  # noqa: E402
 from src.whisper_dataset import (  # noqa: E402
     COMPETITION_ANV_LANGUAGES,
     TrainingRecord,
+    balance_records_by_language,
     collect_records,
     load_record_audio,
     summarize_records,
@@ -134,6 +136,19 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Cap samples per domain/style (good for balanced smoke tests).",
     )
+    parser.add_argument(
+        "--balance-languages",
+        choices=["none", "equal", "cap"],
+        default="none",
+        help="Rebalance train set across languages. 'equal' uses the smallest language count; "
+        "'cap' uses --max-samples-per-language.",
+    )
+    parser.add_argument(
+        "--max-samples-per-language",
+        type=int,
+        default=None,
+        help="Max train clips per language when --balance-languages=cap.",
+    )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--dry-run", action="store_true", help="Print dataset stats and exit.")
     parser.add_argument("--per-device-train-batch-size", type=int, default=8)
@@ -152,7 +167,92 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--gradient-checkpointing", action="store_true")
     parser.add_argument("--report-per-language", action="store_true", default=True)
     parser.add_argument("--no-report-per-language", action="store_false", dest="report_per_language")
+    parser.add_argument(
+        "--eval-all-languages",
+        action="store_true",
+        help="After training, evaluate dev WER for every language (track catastrophic forgetting).",
+    )
+    parser.add_argument(
+        "--report-to",
+        nargs="+",
+        default=["tensorboard"],
+        choices=["wandb", "tensorboard", "none"],
+        help="Logging backends (default: tensorboard). Use: --report-to wandb tensorboard",
+    )
+    parser.add_argument(
+        "--wandb-project",
+        default=os.environ.get("WANDB_PROJECT", "asr-competition"),
+        help="Weights & Biases project name.",
+    )
+    parser.add_argument(
+        "--wandb-run-name",
+        default=os.environ.get("WANDB_RUN_NAME"),
+        help="Weights & Biases run name (default: output folder name).",
+    )
+    parser.add_argument(
+        "--wandb-entity",
+        default=os.environ.get("WANDB_ENTITY"),
+        help="Weights & Biases team/user (optional).",
+    )
+    parser.add_argument(
+        "--wandb-group",
+        default=os.environ.get("WANDB_GROUP"),
+        help="Weights & Biases run group, e.g. smoke-test or swahili-full.",
+    )
+    parser.add_argument(
+        "--resume-from-checkpoint",
+        nargs="?",
+        const=True,
+        default=None,
+        help="Resume from a checkpoint path, or pass flag alone to use the latest checkpoint in --output-dir.",
+    )
     return parser.parse_args()
+
+
+def resolve_report_to(report_to: list[str]) -> list[str]:
+    if "none" in report_to:
+        return []
+    return report_to
+
+
+def configure_wandb_env(args: argparse.Namespace, output_dir: Path) -> None:
+    if "wandb" not in args.report_to:
+        return
+    os.environ.setdefault("WANDB_PROJECT", args.wandb_project)
+    if args.wandb_entity:
+        os.environ["WANDB_ENTITY"] = args.wandb_entity
+    if args.wandb_group:
+        os.environ["WANDB_RUN_GROUP"] = args.wandb_group
+    run_name = args.wandb_run_name or output_dir.name
+    os.environ["WANDB_NAME"] = run_name
+    os.environ.setdefault("WANDB_LOG_MODEL", "false")
+
+
+def log_to_wandb(metrics: dict[str, float]) -> None:
+    if not metrics:
+        return
+    try:
+        import wandb
+    except ImportError:
+        return
+    if wandb.run is None:
+        return
+    wandb.log(metrics)
+
+
+class WandbDatasetCallback(TrainerCallback):
+    """Log dataset summary to wandb once training starts."""
+
+    def __init__(self, config: dict[str, Any]) -> None:
+        self.config = config
+
+    def on_train_begin(self, args, state, control, **kwargs):
+        try:
+            import wandb
+        except ImportError:
+            return
+        if wandb.run is not None:
+            wandb.config.update(self.config)
 
 
 def records_to_dataset(records: list[TrainingRecord]) -> Dataset:
@@ -206,6 +306,15 @@ def main() -> int:
         max_samples_per_source=args.max_samples_per_source,
         **common_kwargs,
     )
+    if args.balance_languages != "none":
+        before = summarize_records(train_records)
+        train_records = balance_records_by_language(
+            train_records,
+            mode=args.balance_languages,
+            max_per_language=args.max_samples_per_language,
+            seed=args.seed,
+        )
+        print(f"Balanced train ({args.balance_languages}): {before} -> {summarize_records(train_records)}")
     eval_records = collect_records(split=args.eval_split, **common_kwargs)
 
     print(f"Work dir: {work_dir}")
@@ -218,6 +327,15 @@ def main() -> int:
     if not train_records:
         print("ERROR: no train records found.", file=sys.stderr)
         return 1
+
+    configure_wandb_env(args, output_dir)
+    report_to = resolve_report_to(args.report_to)
+    if "wandb" in report_to:
+        try:
+            import wandb  # noqa: F401
+        except ImportError:
+            print("WARNING: wandb not installed; remove 'wandb' from --report-to or pip install wandb", file=sys.stderr)
+            report_to = [backend for backend in report_to if backend != "wandb"]
 
     processor = WhisperProcessor.from_pretrained(args.model_name)
     model = WhisperForConditionalGeneration.from_pretrained(args.model_name)
@@ -268,9 +386,26 @@ def main() -> int:
         load_best_model_at_end=eval_ds is not None,
         metric_for_best_model="wer",
         greater_is_better=False,
-        report_to=["tensorboard"],
+        report_to=report_to,
+        run_name=args.wandb_run_name or output_dir.name,
         push_to_hub=False,
     )
+
+    run_config = {
+        "model_name": args.model_name,
+        "train_samples": len(train_records),
+        "eval_samples": len(eval_records),
+        "train_languages": summarize_records(train_records),
+        "eval_languages": summarize_records(eval_records),
+        "swahili_domains": args.swahili_domains,
+        "anv_languages": args.anv_languages,
+        "learning_rate": args.learning_rate,
+        "per_device_train_batch_size": args.per_device_train_batch_size,
+        "gradient_accumulation_steps": args.gradient_accumulation_steps,
+        "max_steps": args.max_steps,
+        "num_train_epochs": args.num_train_epochs,
+    }
+    callbacks = [WandbDatasetCallback(run_config)] if "wandb" in report_to else []
 
     trainer = Seq2SeqTrainer(
         args=training_args,
@@ -280,9 +415,10 @@ def main() -> int:
         data_collator=DataCollatorSpeechSeq2SeqWithPadding(processor),
         compute_metrics=compute_metrics if eval_ds is not None else None,
         processing_class=processor,
+        callbacks=callbacks,
     )
 
-    trainer.train()
+    trainer.train(resume_from_checkpoint=args.resume_from_checkpoint)
 
     if eval_ds is not None:
         overall = trainer.evaluate()
@@ -298,6 +434,32 @@ def main() -> int:
                 print(f"Unweighted average WER: {avg_wer:.2f}%")
                 metrics_path = output_dir / "per_language_wer.json"
                 metrics_path.write_text(json.dumps(per_lang, indent=2), encoding="utf-8")
+                log_to_wandb({f"wer/dev/{language}": wer for language, wer in per_lang.items()})
+                log_to_wandb({"wer/dev/average": avg_wer})
+
+        if args.eval_all_languages:
+            all_eval_records = collect_records(
+                work_dir=work_dir,
+                split=args.eval_split,
+                swahili_domains=tuple(DOMAINS),
+                anv_languages=tuple(COMPETITION_ANV_LANGUAGES),
+                include_swahili=True,
+                include_anv=True,
+                skip_maasai_scripted_train=not args.include_maasai_scripted_train,
+                seed=args.seed,
+            )
+            if all_eval_records:
+                print("\n=== All-language dev WER (sequential / forgetting check) ===")
+                chain_wer = evaluate_per_language(trainer, all_eval_records, processor, metric)
+                for language, wer in chain_wer.items():
+                    print(f"  {language}: {wer:.2f}%")
+                if chain_wer:
+                    chain_avg = float(np.mean(list(chain_wer.values())))
+                    print(f"Unweighted average WER (all langs): {chain_avg:.2f}%")
+                    chain_path = output_dir / "all_language_wer.json"
+                    chain_path.write_text(json.dumps(chain_wer, indent=2), encoding="utf-8")
+                    log_to_wandb({f"wer/chain/{language}": wer for language, wer in chain_wer.items()})
+                    log_to_wandb({"wer/chain/average": chain_avg})
 
     trainer.save_model(str(output_dir / "final"))
     processor.save_pretrained(str(output_dir / "final"))
