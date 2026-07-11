@@ -362,6 +362,7 @@ def main() -> int:
         return {"wer": wer}
 
     use_bf16 = args.bf16 and torch.cuda.is_available() and torch.cuda.is_bf16_supported()
+    max_steps = args.max_steps if args.max_steps is not None else -1
     training_args = Seq2SeqTrainingArguments(
         output_dir=str(output_dir),
         per_device_train_batch_size=args.per_device_train_batch_size,
@@ -369,7 +370,7 @@ def main() -> int:
         gradient_accumulation_steps=args.gradient_accumulation_steps,
         learning_rate=args.learning_rate,
         warmup_steps=args.warmup_steps,
-        max_steps=args.max_steps,
+        max_steps=max_steps,
         num_train_epochs=args.num_train_epochs,
         eval_strategy="steps" if eval_ds is not None else "no",
         eval_steps=args.eval_steps if eval_ds is not None else None,
