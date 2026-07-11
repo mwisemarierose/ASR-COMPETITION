@@ -224,6 +224,32 @@ def load_record_audio(record: TrainingRecord, sample_rate: int = SAMPLE_RATE) ->
     return {"array": array, "sampling_rate": sample_rate}
 
 
+_AUDIO_SKIP_COUNT = 0
+
+
+def try_load_record_audio(
+    record: TrainingRecord,
+    sample_rate: int = SAMPLE_RATE,
+) -> dict[str, Any] | None:
+    """Load audio; return None on corrupt/missing clips instead of crashing training."""
+    global _AUDIO_SKIP_COUNT
+    try:
+        return load_record_audio(record, sample_rate=sample_rate)
+    except Exception as exc:
+        _AUDIO_SKIP_COUNT += 1
+        if _AUDIO_SKIP_COUNT <= 20 or _AUDIO_SKIP_COUNT % 100 == 0:
+            print(
+                f"WARNING: skipping corrupt audio ({_AUDIO_SKIP_COUNT} total) "
+                f"key={record.key} source={record.source}: {exc}",
+                flush=True,
+            )
+        return None
+
+
+def audio_skip_count() -> int:
+    return _AUDIO_SKIP_COUNT
+
+
 def summarize_records(records: list[TrainingRecord]) -> dict[str, int]:
     counts: dict[str, int] = {}
     for record in records:

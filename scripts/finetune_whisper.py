@@ -43,10 +43,11 @@ from src.config import DOMAINS, SAMPLE_RATE  # noqa: E402
 from src.whisper_dataset import (  # noqa: E402
     COMPETITION_ANV_LANGUAGES,
     TrainingRecord,
+    audio_skip_count,
     balance_records_by_language,
     collect_records,
-    load_record_audio,
     summarize_records,
+    try_load_record_audio,
 )
 
 
@@ -73,7 +74,9 @@ class DataCollatorSpeechSeq2SeqWithPadding:
 
         for example in features:
             record = record_from_batch_row(example)
-            audio = load_record_audio(record, sample_rate=SAMPLE_RATE)
+            audio = try_load_record_audio(record, sample_rate=SAMPLE_RATE)
+            if audio is None:
+                continue
             feats = self.processor.feature_extractor(
                 audio["array"],
                 sampling_rate=audio["sampling_rate"],
@@ -81,6 +84,12 @@ class DataCollatorSpeechSeq2SeqWithPadding:
             labels = self.processor.tokenizer(record.sentence).input_ids
             input_features.append({"input_features": feats})
             label_features.append({"input_ids": labels})
+
+        if not input_features:
+            raise RuntimeError(
+                f"Entire batch had invalid audio ({audio_skip_count()} skips so far). "
+                "Check pipeline outputs for corrupt parquet rows."
+            )
 
         batch = self.processor.feature_extractor.pad(input_features, return_tensors="pt")
         labels_batch = self.processor.tokenizer.pad(label_features, return_tensors="pt")
@@ -464,6 +473,10 @@ def main() -> int:
     )
 
     trainer.train(resume_from_checkpoint=args.resume_from_checkpoint)
+
+    skipped = audio_skip_count()
+    if skipped:
+        print(f"Training skipped {skipped} corrupt/unreadable audio clip(s).")
 
     if eval_ds is not None:
         overall = trainer.evaluate()

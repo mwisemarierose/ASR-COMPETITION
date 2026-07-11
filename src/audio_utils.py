@@ -141,19 +141,25 @@ def _decode_audio_bytes(audio_bytes: bytes, sample_rate: int = SAMPLE_RATE) -> n
     except Exception:
         pass
 
+    if not audio_bytes:
+        raise RuntimeError("Empty audio bytes")
+
     resampler = av.AudioResampler(format="flt", layout="mono", rate=sample_rate)
     chunks: list[np.ndarray] = []
 
-    with av.open(io.BytesIO(audio_bytes), metadata_errors="ignore") as container:
-        if not container.streams.audio:
-            raise RuntimeError("No audio stream in parquet bytes")
+    try:
+        with av.open(io.BytesIO(audio_bytes), metadata_errors="ignore") as container:
+            if not container.streams.audio:
+                raise RuntimeError("No audio stream in parquet bytes")
 
-        for frame in container.decode(audio=0):
-            for resampled in resampler.resample(frame):
+            for frame in container.decode(audio=0):
+                for resampled in resampler.resample(frame):
+                    chunks.append(_frame_to_mono_float32(resampled))
+
+            for resampled in resampler.resample(None):
                 chunks.append(_frame_to_mono_float32(resampled))
-
-        for resampled in resampler.resample(None):
-            chunks.append(_frame_to_mono_float32(resampled))
+    except av.error.FFmpegError as exc:
+        raise RuntimeError(f"Cannot decode parquet audio bytes: {exc}") from exc
 
     if not chunks:
         raise RuntimeError("No audio frames decoded from parquet bytes")
