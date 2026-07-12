@@ -35,9 +35,14 @@ fi
 BALANCE="${BALANCE:-cap}"
 MAX_PER_LANGUAGE="${MAX_PER_LANGUAGE:-80000}"
 
+# Stable output dir across SLURM requeues on the preempt partition.
+if [[ -z "${OUTPUT_DIR:-}" && -n "${SLURM_JOB_ID:-}" ]]; then
+  export OUTPUT_DIR="$WORK_DIR/whisper_runs/multilingual_job_${SLURM_JOB_ID}"
+fi
+
 RUN_TAG="$(date +%Y%m%d-%H%M%S)"
 export OUTPUT_DIR="${OUTPUT_DIR:-$WORK_DIR/whisper_runs/multilingual_v1_${RUN_TAG}}"
-export WANDB_RUN_NAME="${WANDB_RUN_NAME:-multilingual-v1-${RUN_TAG}}"
+export WANDB_RUN_NAME="${WANDB_RUN_NAME:-multilingual-v1-${SLURM_JOB_ID:-${RUN_TAG}}}"
 
 mkdir -p "$HF_HOME" "$WORK_DIR/whisper_runs" "$OUTPUT_DIR"
 cd ~/ASR-COMPETITION
@@ -50,6 +55,9 @@ fi
 echo "=== Multilingual training (one model) ==="
 echo "Balance mode: $BALANCE"
 echo "Output: $OUTPUT_DIR"
+if [[ -n "${SLURM_JOB_ID:-}" ]]; then
+  echo "SLURM job: $SLURM_JOB_ID (requeue-safe output dir)"
+fi
 
 echo "=== GPU check ==="
 python -c "import torch; print('CUDA:', torch.cuda.is_available()); print('GPU:', torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'none')"
@@ -65,6 +73,9 @@ RESUME_ARGS=()
 if [[ "${RESUME:-0}" == "1" ]]; then
   RESUME_ARGS=(--resume-from-checkpoint)
   echo "=== Resuming from latest checkpoint in $OUTPUT_DIR ==="
+elif compgen -G "$OUTPUT_DIR/checkpoint-*" > /dev/null; then
+  RESUME_ARGS=(--resume-from-checkpoint)
+  echo "=== Auto-resuming from latest checkpoint in $OUTPUT_DIR (SLURM requeue) ==="
 fi
 
 python scripts/finetune_whisper.py \
@@ -78,11 +89,12 @@ python scripts/finetune_whisper.py \
   --per-device-eval-batch-size 8 \
   --gradient-accumulation-steps 4 \
   --gradient-checkpointing \
-  --eval-steps 2000 \
-  --save-steps 2000 \
+  --eval-steps 4000 \
+  --save-steps 500 \
+  --max-eval-samples 2400 \
   --logging-steps 50 \
   --save-total-limit 3 \
-  --dataloader-num-workers 0 \
+  --dataloader-num-workers 4 \
   --report-to wandb tensorboard \
   --wandb-project "$WANDB_PROJECT" \
   --wandb-group "$WANDB_RUN_GROUP" \

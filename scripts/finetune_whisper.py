@@ -41,6 +41,8 @@ sys.path.insert(0, str(REPO_ROOT))
 
 # Whisper decoder max target length (model rejects longer label sequences).
 WHISPER_MAX_LABEL_LENGTH = 448
+# Whisper is trained on 30-second chunks; longer clips slow training enormously.
+WHISPER_MAX_AUDIO_SECONDS = 30.0
 
 from src.config import DOMAINS, SAMPLE_RATE  # noqa: E402
 from src.whisper_dataset import (  # noqa: E402
@@ -49,6 +51,9 @@ from src.whisper_dataset import (  # noqa: E402
     audio_skip_count,
     balance_records_by_language,
     collect_records,
+    format_duration_summary,
+    subsample_eval_records,
+    summarize_record_durations,
     summarize_records,
     try_load_record_audio,
 )
@@ -71,20 +76,15 @@ class DataCollatorSpeechSeq2SeqWithPadding:
 
     processor: WhisperProcessor
     truncated_label_count: int = 0
+    capped_audio_count: int = 0
 
     def __call__(self, features: list[dict[str, Any]]) -> dict[str, torch.Tensor]:
         input_features: list[dict[str, Any]] = []
         label_features: list[dict[str, Any]] = []
+        max_audio_samples = int(WHISPER_MAX_AUDIO_SECONDS * SAMPLE_RATE)
 
         for example in features:
             record = record_from_batch_row(example)
-            audio = try_load_record_audio(record, sample_rate=SAMPLE_RATE)
-            if audio is None:
-                continue
-            feats = self.processor.feature_extractor(
-                audio["array"],
-                sampling_rate=audio["sampling_rate"],
-            ).input_features[0]
             labels = self.processor.tokenizer(record.sentence).input_ids
             if len(labels) > WHISPER_MAX_LABEL_LENGTH:
                 self.truncated_label_count += 1
@@ -95,6 +95,28 @@ class DataCollatorSpeechSeq2SeqWithPadding:
                         flush=True,
                     )
                 labels = labels[:WHISPER_MAX_LABEL_LENGTH]
+
+            audio = try_load_record_audio(record, sample_rate=SAMPLE_RATE)
+            if audio is None:
+                continue
+
+            audio_array = audio["array"]
+            if len(audio_array) > max_audio_samples:
+                self.capped_audio_count += 1
+                if self.capped_audio_count <= 20 or self.capped_audio_count % 100 == 0:
+                    duration_sec = len(audio_array) / SAMPLE_RATE
+                    print(
+                        f"WARNING: capping long audio ({self.capped_audio_count} total) "
+                        f"key={record.key} {duration_sec:.1f}s -> {WHISPER_MAX_AUDIO_SECONDS}s "
+                        "(clip kept in training)",
+                        flush=True,
+                    )
+                audio_array = audio_array[:max_audio_samples]
+
+            feats = self.processor.feature_extractor(
+                audio_array,
+                sampling_rate=audio["sampling_rate"],
+            ).input_features[0]
             input_features.append({"input_features": feats})
             label_features.append({"input_ids": labels})
 
@@ -185,6 +207,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--num-train-epochs", type=float, default=3.0)
     parser.add_argument("--eval-steps", type=int, default=500)
     parser.add_argument("--save-steps", type=int, default=500)
+    parser.add_argument(
+        "--max-eval-samples",
+        type=int,
+        default=None,
+        help="Cap dev clips used during training-time eval (full dev still used at end). "
+        "Balanced across languages when set.",
+    )
     parser.add_argument("--logging-steps", type=int, default=25)
     parser.add_argument("--save-total-limit", type=int, default=3)
     parser.add_argument("--dataloader-num-workers", type=int, default=4)
@@ -390,10 +419,23 @@ def main() -> int:
         )
         print(f"Balanced train ({args.balance_languages}): {before} -> {summarize_records(train_records)}")
     eval_records = collect_records(split=args.eval_split, **common_kwargs)
+    eval_records_for_training = subsample_eval_records(
+        eval_records,
+        max_samples=args.max_eval_samples,
+        seed=args.seed,
+    )
 
     print(f"Work dir: {work_dir}")
     print(f"Train samples: {len(train_records)} — {summarize_records(train_records)}")
     print(f"Eval samples:  {len(eval_records)} — {summarize_records(eval_records)}")
+    if args.max_eval_samples and len(eval_records_for_training) < len(eval_records):
+        print(
+            f"Training-time eval samples: {len(eval_records_for_training)} "
+            f"(capped from {len(eval_records)}) — {summarize_records(eval_records_for_training)}"
+        )
+    train_duration = summarize_record_durations(train_records)
+    print("Train audio duration (from manifest metadata):")
+    print(format_duration_summary(train_duration))
 
     if args.dry_run:
         return 0
@@ -413,7 +455,7 @@ def main() -> int:
         model.gradient_checkpointing_enable()
 
     train_ds = records_to_dataset(train_records)
-    eval_ds = records_to_dataset(eval_records) if eval_records else None
+    eval_ds = records_to_dataset(eval_records_for_training) if eval_records_for_training else None
 
     metric = evaluate.load("wer")
 
@@ -497,7 +539,12 @@ def main() -> int:
     if collator.truncated_label_count:
         print(
             f"Training truncated {collator.truncated_label_count} transcript(s) "
-            f"to {WHISPER_MAX_LABEL_LENGTH} tokens."
+            f"to {WHISPER_MAX_LABEL_LENGTH} tokens (clips still used)."
+        )
+    if collator.capped_audio_count:
+        print(
+            f"Training capped {collator.capped_audio_count} clip(s) "
+            f"to first {WHISPER_MAX_AUDIO_SECONDS}s (clips still used)."
         )
 
     if eval_ds is not None:

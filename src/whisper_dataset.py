@@ -36,6 +36,7 @@ class TrainingRecord:
     audio_path: str | None = None
     audio_source: dict[str, Any] | None = None
     source: str = ""
+    duration_sec: float | None = None
 
     def to_row(self) -> dict[str, Any]:
         return {
@@ -45,6 +46,7 @@ class TrainingRecord:
             "audio_path": self.audio_path or "",
             "audio_source": json.dumps(self.audio_source) if self.audio_source else "",
             "source": self.source,
+            "duration_sec": self.duration_sec if self.duration_sec is not None else "",
         }
 
 
@@ -87,6 +89,7 @@ def iter_swahili_records(
                 language="swahili",
                 audio_path=audio_path,
                 source=f"swahili/{domain}/{split}",
+                duration_sec=_row_duration_sec(row),
             )
 
 
@@ -118,6 +121,7 @@ def iter_anv_records(
                     language=language,
                     audio_source=audio_source,
                     source=f"{language}/{split}/{style}",
+                    duration_sec=_row_duration_sec(row),
                 )
 
 
@@ -248,6 +252,99 @@ def try_load_record_audio(
 
 def audio_skip_count() -> int:
     return _AUDIO_SKIP_COUNT
+
+
+def _row_duration_sec(row: dict[str, Any]) -> float | None:
+    for key in ("duration_sec", "duration", "csv_duration_sec"):
+        value = row.get(key)
+        if value in (None, ""):
+            continue
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            continue
+        if parsed > 0:
+            return parsed
+    return None
+
+
+def summarize_record_durations(records: list[TrainingRecord]) -> dict[str, Any]:
+    """Sum manifest durations for the exact training subset."""
+    total_sec = 0.0
+    known = 0
+    missing = 0
+    by_language_sec: dict[str, float] = {}
+    by_language_known: dict[str, int] = {}
+
+    for record in records:
+        if record.duration_sec is None:
+            missing += 1
+            continue
+        total_sec += record.duration_sec
+        known += 1
+        by_language_sec[record.language] = by_language_sec.get(record.language, 0.0) + record.duration_sec
+        by_language_known[record.language] = by_language_known.get(record.language, 0) + 1
+
+    by_language_hours = {
+        language: by_language_sec[language] / 3600.0
+        for language in sorted(by_language_sec)
+    }
+    return {
+        "clips": len(records),
+        "clips_with_duration": known,
+        "clips_missing_duration": missing,
+        "total_seconds": total_sec,
+        "total_hours": total_sec / 3600.0,
+        "avg_seconds_known_clips": (total_sec / known) if known else None,
+        "hours_by_language": by_language_hours,
+        "clips_by_language_with_duration": dict(sorted(by_language_known.items())),
+    }
+
+
+def format_duration_summary(summary: dict[str, Any]) -> str:
+    lines = [
+        f"Clips: {summary['clips']:,} "
+        f"(duration known for {summary['clips_with_duration']:,}; "
+        f"missing for {summary['clips_missing_duration']:,})",
+        f"Total audio: {summary['total_hours']:.1f} hours "
+        f"({summary['total_seconds']:,.0f} seconds)",
+    ]
+    if summary["avg_seconds_known_clips"] is not None:
+        lines.append(f"Average clip length (known): {summary['avg_seconds_known_clips']:.2f}s")
+    lines.append("Hours by language:")
+    for language, hours in summary["hours_by_language"].items():
+        clips = summary["clips_by_language_with_duration"].get(language, 0)
+        lines.append(f"  {language}: {hours:.1f}h ({clips:,} clips)")
+    return "\n".join(lines)
+
+
+def subsample_eval_records(
+    records: list[TrainingRecord],
+    max_samples: int | None,
+    seed: int = 42,
+) -> list[TrainingRecord]:
+    """Balanced dev subset for faster training-time eval; full dev used at end."""
+    if max_samples is None or len(records) <= max_samples:
+        return records
+
+    by_language: dict[str, list[TrainingRecord]] = {}
+    for record in records:
+        by_language.setdefault(record.language, []).append(record)
+
+    per_language = max(1, max_samples // len(by_language))
+    rng = random.Random(seed)
+    sampled: list[TrainingRecord] = []
+    for language in sorted(by_language):
+        rows = by_language[language]
+        if len(rows) <= per_language:
+            sampled.extend(rows)
+        else:
+            sampled.extend(rng.sample(rows, per_language))
+
+    if len(sampled) > max_samples:
+        rng.shuffle(sampled)
+        sampled = sampled[:max_samples]
+    return sampled
 
 
 def summarize_records(records: list[TrainingRecord]) -> dict[str, int]:
