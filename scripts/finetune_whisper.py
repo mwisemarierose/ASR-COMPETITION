@@ -214,6 +214,13 @@ def parse_args() -> argparse.Namespace:
         help="Cap dev clips used during training-time eval (full dev still used at end). "
         "Balanced across languages when set.",
     )
+    parser.add_argument(
+        "--per-language-eval-steps",
+        type=int,
+        default=500,
+        help="Run per-language dev WER + competition average every N steps (on save). "
+        "Set 0 to disable during training.",
+    )
     parser.add_argument("--logging-steps", type=int, default=25)
     parser.add_argument("--save-total-limit", type=int, default=3)
     parser.add_argument("--dataloader-num-workers", type=int, default=4)
@@ -291,16 +298,66 @@ def split_report_to(report_to: list[str]) -> tuple[bool, list[str]]:
     return want_wandb, trainer_report_to
 
 
-def log_to_wandb(metrics: dict[str, float]) -> None:
+def log_to_wandb(metrics: dict[str, float], step: int | None = None) -> None:
     if not metrics:
         return
     try:
         import wandb
 
         if wandb.run is not None:
-            wandb.log(metrics)
+            wandb.log(metrics, step=step)
     except Exception as exc:
         print(f"WARNING: wandb log failed ({exc})", file=sys.stderr)
+
+
+class PerLanguageEvalCallback(TrainerCallback):
+    """Competition-style per-language WER on checkpoint save (unweighted average)."""
+
+    def __init__(
+        self,
+        eval_records: list[TrainingRecord],
+        processor: WhisperProcessor,
+        metric: Any,
+        eval_every_steps: int,
+    ) -> None:
+        self.eval_records = eval_records
+        self.processor = processor
+        self.metric = metric
+        self.eval_every_steps = eval_every_steps
+        self.trainer: Seq2SeqTrainer | None = None
+
+    def bind_trainer(self, trainer: Seq2SeqTrainer) -> None:
+        self.trainer = trainer
+
+    def on_save(self, args, state, control, **kwargs):
+        if state.global_step == 0 or state.global_step % self.eval_every_steps != 0:
+            return
+        if self.trainer is None or not self.eval_records:
+            return
+        print(f"\n=== Per-language dev WER @ step {state.global_step} ===", flush=True)
+        try:
+            per_lang = evaluate_per_language(
+                self.trainer,
+                self.eval_records,
+                self.processor,
+                self.metric,
+            )
+        except Exception as exc:
+            print(f"WARNING: per-language eval failed ({exc})", file=sys.stderr)
+            return
+        for language, wer in per_lang.items():
+            print(f"  {language}: {wer:.2f}%", flush=True)
+        if not per_lang:
+            return
+        avg_wer = float(np.mean(list(per_lang.values())))
+        print(f"Unweighted average WER: {avg_wer:.2f}%", flush=True)
+        log_to_wandb(
+            {
+                **{f"wer/dev/{language}": wer for language, wer in per_lang.items()},
+                "wer/dev/average": avg_wer,
+            },
+            step=state.global_step,
+        )
 
 
 class SafeWandbCallback(TrainerCallback):
@@ -455,7 +512,15 @@ def main() -> int:
         model.gradient_checkpointing_enable()
 
     train_ds = records_to_dataset(train_records)
-    eval_ds = records_to_dataset(eval_records_for_training) if eval_records_for_training else None
+    use_per_lang_eval = (
+        args.per_language_eval_steps > 0
+        and bool(eval_records_for_training)
+    )
+    training_eval_ds = (
+        None
+        if use_per_lang_eval
+        else (records_to_dataset(eval_records_for_training) if eval_records_for_training else None)
+    )
 
     metric = evaluate.load("wer")
 
@@ -481,8 +546,8 @@ def main() -> int:
         warmup_steps=args.warmup_steps,
         max_steps=max_steps,
         num_train_epochs=args.num_train_epochs,
-        eval_strategy="steps" if eval_ds is not None else "no",
-        eval_steps=args.eval_steps if eval_ds is not None else None,
+        eval_strategy="no" if use_per_lang_eval else ("steps" if training_eval_ds is not None else "no"),
+        eval_steps=None if use_per_lang_eval else (args.eval_steps if training_eval_ds is not None else None),
         save_strategy="steps",
         save_steps=args.save_steps,
         logging_steps=args.logging_steps,
@@ -494,7 +559,7 @@ def main() -> int:
         dataloader_num_workers=args.dataloader_num_workers,
         remove_unused_columns=False,
         label_names=["labels"],
-        load_best_model_at_end=eval_ds is not None,
+        load_best_model_at_end=training_eval_ds is not None and not use_per_lang_eval,
         metric_for_best_model="wer",
         greater_is_better=False,
         report_to=trainer_report_to,
@@ -524,12 +589,26 @@ def main() -> int:
         args=training_args,
         model=model,
         train_dataset=train_ds,
-        eval_dataset=eval_ds,
+        eval_dataset=training_eval_ds,
         data_collator=collator,
-        compute_metrics=compute_metrics if eval_ds is not None else None,
+        compute_metrics=compute_metrics if training_eval_ds is not None else None,
         processing_class=processor,
         callbacks=callbacks,
     )
+    if use_per_lang_eval:
+        per_lang_callback = PerLanguageEvalCallback(
+            eval_records_for_training,
+            processor,
+            metric,
+            args.per_language_eval_steps,
+        )
+        per_lang_callback.bind_trainer(trainer)
+        trainer.add_callback(per_lang_callback)
+        print(
+            f"Per-language eval every {args.per_language_eval_steps} steps "
+            f"on {len(eval_records_for_training)} dev clips "
+            f"({summarize_records(eval_records_for_training)})"
+        )
 
     trainer.train(resume_from_checkpoint=args.resume_from_checkpoint)
 
@@ -547,10 +626,7 @@ def main() -> int:
             f"to first {WHISPER_MAX_AUDIO_SECONDS}s (clips still used)."
         )
 
-    if eval_ds is not None:
-        overall = trainer.evaluate()
-        print(f"Overall dev WER: {overall.get('eval_wer', overall.get('wer')):.2f}%")
-
+    if eval_records:
         if args.report_per_language:
             per_lang = evaluate_per_language(trainer, eval_records, processor, metric)
             print("Per-language dev WER:")

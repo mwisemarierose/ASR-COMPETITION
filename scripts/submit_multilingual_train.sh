@@ -4,7 +4,8 @@
 # Usage:
 #   ./scripts/submit_multilingual_train.sh
 #   BALANCE=none ./scripts/submit_multilingual_train.sh      # all 970k clips
-#   BALANCE=cap MAX_PER_LANGUAGE=80000 ./scripts/submit_multilingual_train.sh
+#   EPOCHS=1 ./scripts/submit_multilingual_train.sh           # one epoch (default)
+#   EPOCHS=3 ./scripts/submit_multilingual_train.sh           # three epochs
 set -euo pipefail
 
 cd ~/ASR-COMPETITION
@@ -24,6 +25,7 @@ JOBID=$(sbatch --parsable \
 echo "Submitted multilingual training (one model, all 6 languages)"
 echo "Job ID:  $JOBID"
 echo "Balance: ${BALANCE:-cap} (MAX_PER_LANGUAGE=${MAX_PER_LANGUAGE:-80000})"
+echo "Epochs:  ${EPOCHS:-1}"
 echo ""
 echo "Watch log:"
 echo "  tail -f logs/whisper-multilingual-${JOBID}.out"

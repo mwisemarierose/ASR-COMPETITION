@@ -12,6 +12,10 @@
 #
 # Resume:
 #   OUTPUT_DIR=.../multilingual_v1_... RESUME=1 sbatch ... scripts/train_multilingual.sh
+#
+# Epochs (EPOCHS env var):
+#   EPOCHS=1 ./scripts/submit_multilingual_train.sh   # one epoch (~13k steps)
+#   EPOCHS=3 ./scripts/submit_multilingual_train.sh   # full run (~40k steps)
 set -euo pipefail
 
 source ~/miniforge3/etc/profile.d/conda.sh
@@ -34,6 +38,7 @@ fi
 
 BALANCE="${BALANCE:-cap}"
 MAX_PER_LANGUAGE="${MAX_PER_LANGUAGE:-80000}"
+EPOCHS="${EPOCHS:-1}"
 
 # Stable output dir across SLURM requeues on the preempt partition.
 if [[ -z "${OUTPUT_DIR:-}" && -n "${SLURM_JOB_ID:-}" ]]; then
@@ -54,6 +59,7 @@ fi
 
 echo "=== Multilingual training (one model) ==="
 echo "Balance mode: $BALANCE"
+echo "Epochs: $EPOCHS"
 echo "Output: $OUTPUT_DIR"
 if [[ -n "${SLURM_JOB_ID:-}" ]]; then
   echo "SLURM job: $SLURM_JOB_ID (requeue-safe output dir)"
@@ -82,15 +88,15 @@ python scripts/finetune_whisper.py \
   --work-dir "$WORK_DIR" \
   --output-dir "$OUTPUT_DIR" \
   --model-name openai/whisper-small \
-  --num-train-epochs 3 \
+  --num-train-epochs "$EPOCHS" \
   --learning-rate 1e-5 \
   --warmup-steps 1000 \
   --per-device-train-batch-size 8 \
   --per-device-eval-batch-size 8 \
   --gradient-accumulation-steps 4 \
   --gradient-checkpointing \
-  --eval-steps 4000 \
   --save-steps 500 \
+  --per-language-eval-steps 500 \
   --max-eval-samples 2400 \
   --logging-steps 50 \
   --save-total-limit 3 \
