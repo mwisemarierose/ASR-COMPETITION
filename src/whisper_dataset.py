@@ -46,7 +46,6 @@ class TrainingRecord:
             "audio_path": self.audio_path or "",
             "audio_source": json.dumps(self.audio_source) if self.audio_source else "",
             "source": self.source,
-            "duration_sec": self.duration_sec if self.duration_sec is not None else "",
         }
 
 
