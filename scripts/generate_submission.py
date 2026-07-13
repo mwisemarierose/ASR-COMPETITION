@@ -59,7 +59,16 @@ def parse_args() -> argparse.Namespace:
         required=True,
         help="Output CSV or Parquet path.",
     )
-    parser.add_argument("--test-split", default="test", help="Manifest split to transcribe.")
+    parser.add_argument(
+        "--swahili-split",
+        default="test",
+        help="Manifest split for Swahili (under processed/{domain}/).",
+    )
+    parser.add_argument(
+        "--anv-split",
+        default="dev_test",
+        help="Manifest split for Anv languages (under cleaned/{language}/).",
+    )
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--max-audio-seconds", type=float, default=MAX_AUDIO_SECONDS)
     parser.add_argument(
@@ -186,7 +195,9 @@ def main() -> int:
 
     test_records = collect_records(
         work_dir=work_dir,
-        split=args.test_split,
+        split="test",
+        swahili_split=args.swahili_split,
+        anv_split=args.anv_split,
         swahili_domains=tuple(DOMAINS),
         anv_languages=tuple(COMPETITION_ANV_LANGUAGES),
         include_swahili=True,
@@ -196,11 +207,12 @@ def main() -> int:
         max_samples=args.max_samples,
     )
     if not test_records:
-        print("ERROR: no test records found. Run the pipeline on the test split first.", file=sys.stderr)
+        print("ERROR: no test records found. Check split paths under WORK_DIR.", file=sys.stderr)
         return 1
 
     print(f"Work dir: {work_dir}")
-    print(f"Test split: {args.test_split}")
+    print(f"Swahili split: {args.swahili_split}")
+    print(f"Anv split: {args.anv_split}")
     print(f"Test clips: {len(test_records)} — {summarize_records(test_records)}")
     if args.expected_rows and len(test_records) != args.expected_rows:
         print(

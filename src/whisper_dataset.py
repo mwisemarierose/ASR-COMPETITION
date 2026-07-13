@@ -135,6 +135,8 @@ def collect_records(
     work_dir: Path,
     split: str,
     *,
+    swahili_split: str | None = None,
+    anv_split: str | None = None,
     swahili_domains: tuple[str, ...] = DOMAINS,
     anv_languages: tuple[str, ...] = COMPETITION_ANV_LANGUAGES,
     include_swahili: bool = True,
@@ -146,12 +148,14 @@ def collect_records(
     seed: int = 42,
 ) -> list[TrainingRecord]:
     records: list[TrainingRecord] = []
+    sw_split = swahili_split or split
+    anv_split_name = anv_split or split
 
     if include_swahili:
         records.extend(
             iter_swahili_records(
                 work_dir,
-                split,
+                sw_split,
                 domains=swahili_domains,
                 require_transcript=require_transcript,
             )
@@ -160,7 +164,7 @@ def collect_records(
         records.extend(
             iter_anv_records(
                 work_dir,
-                split,
+                anv_split_name,
                 languages=anv_languages,
                 skip_maasai_scripted_train=skip_maasai_scripted_train,
                 require_transcript=require_transcript,

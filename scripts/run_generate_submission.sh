@@ -18,6 +18,8 @@ MODEL_DIR="${MODEL_DIR:-$WORK_DIR/whisper_runs/multilingual_job_125891/checkpoin
 OUTPUT="${OUTPUT:-$WORK_DIR/whisper_runs/submission_checkpoint-12500.csv}"
 BATCH_SIZE="${BATCH_SIZE:-8}"
 FORCE_LANG_PROMPTS="${FORCE_LANG_PROMPTS:-0}"
+SWAHILI_SPLIT="${SWAHILI_SPLIT:-test}"
+ANV_SPLIT="${ANV_SPLIT:-dev_test}"
 
 cd ~/ASR-COMPETITION
 mkdir -p "$HF_HOME"
@@ -34,10 +36,14 @@ echo "Model:  $MODEL_DIR"
 echo "Output: $OUTPUT"
 echo "Batch:  $BATCH_SIZE"
 
+echo "Swahili split: $SWAHILI_SPLIT | Anv split: $ANV_SPLIT"
+
 python scripts/generate_submission.py \
   --work-dir "$WORK_DIR" \
   --model-dir "$MODEL_DIR" \
   --output "$OUTPUT" \
+  --swahili-split "$SWAHILI_SPLIT" \
+  --anv-split "$ANV_SPLIT" \
   --batch-size "$BATCH_SIZE" \
   --expected-rows 41733 \
   "${PROMPT_ARGS[@]}" \
