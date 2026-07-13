@@ -16,6 +16,7 @@ from .archive_extractor import ExtractionReport, TarXzArchiveExtractor
 from .audio_utils import (
     audio_bytes_from_struct,
     duration_from_audio_bytes,
+    make_parquet_record_key,
     resolve_parquet_id_column,
     resolve_parquet_text_column,
 )
@@ -59,21 +60,6 @@ class ParquetFilterStats:
             "duplicate_key": self.duplicate_key,
             "kept": self.kept,
         }
-
-
-def _make_parquet_key(
-    recorder_id: str | None,
-    parquet_path: Path,
-    row_index: int,
-    media_path_id: str | None = None,
-) -> str:
-    """Build a unique clip key. Never use recorder_uuid alone — speakers have many clips."""
-    if media_path_id:
-        return str(media_path_id)
-    clip_id = f"{parquet_path.stem}_{row_index:06d}"
-    if recorder_id:
-        return f"{recorder_id}_{clip_id}"
-    return clip_id
 
 
 def _process_parquet_shard(
@@ -170,7 +156,7 @@ def _process_parquet_shard(
             stats.too_long += 1
             continue
 
-        key = _make_parquet_key(recorder_id, path, row_index, media_path_id)
+        key = make_parquet_record_key(recorder_id, path, row_index, media_path_id)
         if key in seen_keys:
             stats.duplicate_key += 1
             continue

@@ -9,7 +9,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterator
 
-from .audio_utils import load_audio_mono, load_parquet_row_audio
+from .audio_utils import (
+    PARQUET_AUDIO_COLUMNS,
+    load_audio_mono,
+    load_parquet_row_audio,
+    make_parquet_record_key,
+    resolve_parquet_id_column,
+)
 from .config import ANV_STYLES, DOMAINS, SAMPLE_RATE
 
 # Whisper tokenizer language codes (None = no dedicated token; model still learns from text).
@@ -24,6 +30,18 @@ WHISPER_LANGUAGE_CODES: dict[str, str | None] = {
 }
 
 COMPETITION_ANV_LANGUAGES = ("kalenjin", "kikuyu", "dholuo", "somali", "maasai")
+
+# Kaggle competition test bundle (digitalumuganda/anv-test-data-nt).
+# All six languages including Swahili are Parquet under short folder codes.
+KAGGLE_NT_LANGUAGE_DIRS: dict[str, str] = {
+    "kik": "kikuyu",
+    "kln": "kalenjin",
+    "luo": "dholuo",
+    "mas": "maasai",
+    "som": "somali",
+    "swa": "swahili",
+}
+KAGGLE_NT_STYLE_DIRS = ("Scripted", "Unscripted")
 
 
 @dataclass(frozen=True)
@@ -129,6 +147,131 @@ def iter_anv_records(
                     source=f"{language}/{split}/{style}",
                     duration_sec=_row_duration_sec(row),
                 )
+
+
+def _parquet_has_audio_column(schema_names: list[str]) -> bool:
+    return any(name in schema_names for name in PARQUET_AUDIO_COLUMNS)
+
+
+def _resolve_kaggle_style_dir(lang_dir: Path, style_name: str) -> Path | None:
+    for candidate in (style_name, style_name.lower(), style_name.capitalize()):
+        path = lang_dir / candidate
+        if path.is_dir():
+            return path
+    return None
+
+
+def iter_kaggle_nt_test_records(test_root: Path) -> Iterator[TrainingRecord]:
+    """
+    Iterate competition test clips from the Kaggle anv-test-data-nt layout.
+
+    Layout: {kik|kln|luo|mas|som|swa}/{Scripted|Unscripted}/*.parquet
+    Swahili test is Parquet here (not Afrivoice tar.xz used for training).
+    """
+    import pyarrow.parquet as pq
+
+    test_root = test_root.resolve()
+    for dir_name, language in sorted(KAGGLE_NT_LANGUAGE_DIRS.items()):
+        lang_dir = test_root / dir_name
+        if not lang_dir.is_dir():
+            continue
+        for style_name in KAGGLE_NT_STYLE_DIRS:
+            style_dir = _resolve_kaggle_style_dir(lang_dir, style_name)
+            if style_dir is None:
+                continue
+            style_tag = style_name.lower()
+            for parquet_path in sorted(style_dir.glob("*.parquet")):
+                schema_names = pq.read_schema(parquet_path).names
+                if not _parquet_has_audio_column(schema_names):
+                    continue
+
+                id_col = resolve_parquet_id_column(schema_names)
+                id_columns: list[str] = []
+                if id_col:
+                    id_columns.append(id_col)
+                for extra_id_col in ("mediaPathId", "media_path_id"):
+                    if extra_id_col in schema_names and extra_id_col not in id_columns:
+                        id_columns.append(extra_id_col)
+
+                if id_columns:
+                    table = pq.read_table(parquet_path, columns=id_columns)
+                    num_rows = table.num_rows
+                else:
+                    table = None
+                    num_rows = pq.read_metadata(parquet_path).num_rows
+
+                parquet_path_str = str(parquet_path.resolve())
+                for row_index in range(num_rows):
+                    recorder_id = None
+                    media_path_id = None
+                    if table is not None:
+                        if id_col:
+                            value = table.column(id_col)[row_index].as_py()
+                            if value is not None:
+                                recorder_id = str(value).strip()
+                        if "mediaPathId" in schema_names:
+                            value = table.column("mediaPathId")[row_index].as_py()
+                            if value is not None:
+                                media_path_id = str(value).strip()
+                        elif "media_path_id" in schema_names:
+                            value = table.column("media_path_id")[row_index].as_py()
+                            if value is not None:
+                                media_path_id = str(value).strip()
+
+                    key = make_parquet_record_key(
+                        recorder_id,
+                        parquet_path,
+                        row_index,
+                        media_path_id,
+                    )
+                    yield TrainingRecord(
+                        key=key,
+                        sentence="",
+                        language=language,
+                        audio_source={
+                            "type": "parquet",
+                            "path": parquet_path_str,
+                            "row": row_index,
+                        },
+                        source=f"kaggle_nt/{dir_name}/{style_tag}/{parquet_path.name}",
+                    )
+
+
+def collect_kaggle_nt_test_records(
+    test_root: Path,
+    *,
+    max_samples: int | None = None,
+    seed: int = 42,
+) -> list[TrainingRecord]:
+    records = list(iter_kaggle_nt_test_records(test_root))
+    if max_samples is not None and len(records) > max_samples:
+        rng = random.Random(seed)
+        records = rng.sample(records, max_samples)
+    return records
+
+
+def load_submission_id_order(test_root: Path, id_column: str = "ID") -> list[str] | None:
+    """Return clip IDs from sample_submission.* if present in the Kaggle bundle."""
+    for name in ("sample_submission.csv", "sample_submission.parquet"):
+        path = test_root / name
+        if not path.is_file():
+            continue
+        if path.suffix.lower() == ".csv":
+            import csv
+
+            with path.open(encoding="utf-8", newline="") as handle:
+                reader = csv.DictReader(handle)
+                if reader.fieldnames and id_column not in reader.fieldnames:
+                    return None
+                return [str(row[id_column]).strip() for row in reader if row.get(id_column)]
+
+        import pandas as pd
+
+        frame = pd.read_parquet(path)
+        if id_column not in frame.columns:
+            return None
+        return [str(value).strip() for value in frame[id_column].tolist()]
+    return None
 
 
 def collect_records(

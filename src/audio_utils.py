@@ -241,3 +241,18 @@ def resolve_parquet_id_column(schema_names: list[str]) -> str | None:
         if candidate in schema_names:
             return candidate
     return None
+
+
+def make_parquet_record_key(
+    recorder_id: str | None,
+    parquet_path: Path,
+    row_index: int,
+    media_path_id: str | None = None,
+) -> str:
+    """Build a unique clip key. Never use recorder_uuid alone — speakers have many clips."""
+    if media_path_id:
+        return str(media_path_id)
+    clip_id = f"{parquet_path.stem}_{row_index:06d}"
+    if recorder_id:
+        return f"{recorder_id}_{clip_id}"
+    return clip_id

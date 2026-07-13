@@ -2,13 +2,15 @@
 """
 Generate competition submission CSV/Parquet from a fine-tuned Whisper checkpoint.
 
-Runs inference on the test split manifests under WORK_DIR and writes one row per clip.
+Default test source is the Kaggle bundle (anv-test-data-nt): all six languages,
+including Swahili, as Parquet under swa/kik/kln/luo/mas/som. Training Swahili
+was Afrivoice tar.xz; do not use WORK_DIR processed/swahili for the 41,733-row upload.
 
 Usage:
   python scripts/generate_submission.py \\
-    --work-dir /project/community/rmwisene/pipeline_outputs \\
     --model-dir /project/.../checkpoint-12500 \\
-    --output /project/.../submission_v1.csv
+    --output /project/.../submission_v1.csv \\
+    --kaggle-test-root /project/.../datasets/anv-test-data-nt
 """
 from __future__ import annotations
 
@@ -29,7 +31,9 @@ from src.config import DOMAINS, SAMPLE_RATE  # noqa: E402
 from src.whisper_dataset import (  # noqa: E402
     COMPETITION_ANV_LANGUAGES,
     TrainingRecord,
+    collect_kaggle_nt_test_records,
     collect_records,
+    load_submission_id_order,
     set_forced_language_prompt,
     summarize_records,
     try_load_record_audio,
@@ -45,7 +49,24 @@ def parse_args() -> argparse.Namespace:
         "--work-dir",
         type=Path,
         default=Path(os.environ.get("WORK_DIR", REPO_ROOT / "outputs")),
-        help="Pipeline output root (processed/, cleaned/).",
+        help="Pipeline output root (only used with --test-source work_dir).",
+    )
+    parser.add_argument(
+        "--test-source",
+        choices=("kaggle_nt", "work_dir"),
+        default=os.environ.get("TEST_SOURCE", "kaggle_nt"),
+        help="kaggle_nt = official 41,733-row competition test; work_dir = local manifests.",
+    )
+    parser.add_argument(
+        "--kaggle-test-root",
+        type=Path,
+        default=Path(
+            os.environ.get(
+                "KAGGLE_TEST_ROOT",
+                "/project/community/rmwisene/datasets/anv-test-data-nt",
+            )
+        ),
+        help="Root of digitalumuganda/anv-test-data-nt download.",
     )
     parser.add_argument(
         "--model-dir",
@@ -187,14 +208,16 @@ def write_submission(
         writer.writerows(rows)
 
 
-def main() -> int:
-    args = parse_args()
-    work_dir = args.work_dir.resolve()
-    model_dir = args.model_dir.resolve()
-    output_path = args.output.resolve()
+def collect_test_records(args: argparse.Namespace) -> list[TrainingRecord]:
+    if args.test_source == "kaggle_nt":
+        test_root = args.kaggle_test_root.resolve()
+        if not test_root.is_dir():
+            print(f"ERROR: Kaggle test root not found: {test_root}", file=sys.stderr)
+            return []
+        return collect_kaggle_nt_test_records(test_root, max_samples=args.max_samples)
 
-    test_records = collect_records(
-        work_dir=work_dir,
+    return collect_records(
+        work_dir=args.work_dir.resolve(),
         split="test",
         swahili_split=args.swahili_split,
         anv_split=args.anv_split,
@@ -206,13 +229,64 @@ def main() -> int:
         require_transcript=False,
         max_samples=args.max_samples,
     )
+
+
+def order_submission_rows(
+    rows: list[tuple[str, str]],
+    *,
+    id_order: list[str] | None,
+) -> list[tuple[str, str]]:
+    if not id_order:
+        rows.sort(key=lambda item: item[0])
+        return rows
+
+    by_id = dict(rows)
+    ordered: list[tuple[str, str]] = []
+    missing_ids: list[str] = []
+    for clip_id in id_order:
+        if clip_id in by_id:
+            ordered.append((clip_id, by_id.pop(clip_id)))
+        else:
+            missing_ids.append(clip_id)
+
+    if missing_ids:
+        print(
+            f"WARNING: {len(missing_ids)} ID(s) from sample_submission missing from predictions.",
+            file=sys.stderr,
+        )
+    if by_id:
+        print(
+            f"WARNING: {len(by_id)} predicted ID(s) not in sample_submission; appending at end.",
+            file=sys.stderr,
+        )
+        ordered.extend(sorted(by_id.items(), key=lambda item: item[0]))
+    return ordered
+
+
+def main() -> int:
+    args = parse_args()
+    work_dir = args.work_dir.resolve()
+    model_dir = args.model_dir.resolve()
+    output_path = args.output.resolve()
+
+    test_records = collect_test_records(args)
     if not test_records:
-        print("ERROR: no test records found. Check split paths under WORK_DIR.", file=sys.stderr)
+        if args.test_source == "kaggle_nt":
+            print(
+                "ERROR: no test records found. Download anv-test-data-nt to --kaggle-test-root.",
+                file=sys.stderr,
+            )
+        else:
+            print("ERROR: no test records found. Check split paths under WORK_DIR.", file=sys.stderr)
         return 1
 
-    print(f"Work dir: {work_dir}")
-    print(f"Swahili split: {args.swahili_split}")
-    print(f"Anv split: {args.anv_split}")
+    print(f"Test source: {args.test_source}")
+    if args.test_source == "kaggle_nt":
+        print(f"Kaggle test root: {args.kaggle_test_root.resolve()}")
+    else:
+        print(f"Work dir: {work_dir}")
+        print(f"Swahili split: {args.swahili_split}")
+        print(f"Anv split: {args.anv_split}")
     print(f"Test clips: {len(test_records)} — {summarize_records(test_records)}")
     if args.expected_rows and len(test_records) != args.expected_rows:
         print(
@@ -260,8 +334,13 @@ def main() -> int:
         )
         submission_rows.extend(lang_rows)
 
-    # Preserve stable order: sort by ID for reproducible uploads.
-    submission_rows.sort(key=lambda item: item[0])
+    id_order = None
+    if args.test_source == "kaggle_nt":
+        id_order = load_submission_id_order(args.kaggle_test_root.resolve(), args.id_column)
+        if id_order:
+            print(f"Ordering rows to match sample_submission ({len(id_order)} IDs)")
+
+    submission_rows = order_submission_rows(submission_rows, id_order=id_order)
     write_submission(
         submission_rows,
         output_path,

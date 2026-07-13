@@ -13,6 +13,8 @@ export WORK_DIR="${WORK_DIR:-/project/community/rmwisene/pipeline_outputs}"
 export HF_HOME="${HF_HOME:-/project/community/rmwisene/hf_cache}"
 export TRANSFORMERS_CACHE="$HF_HOME"
 export TOKENIZERS_PARALLELISM=false
+export KAGGLE_TEST_ROOT="${KAGGLE_TEST_ROOT:-/project/community/rmwisene/datasets/anv-test-data-nt}"
+export TEST_SOURCE="${TEST_SOURCE:-kaggle_nt}"
 
 MODEL_DIR="${MODEL_DIR:-$WORK_DIR/whisper_runs/multilingual_job_125891/checkpoint-12500}"
 OUTPUT="${OUTPUT:-$WORK_DIR/whisper_runs/submission_checkpoint-12500.csv}"
@@ -35,10 +37,11 @@ echo "=== Generate submission ==="
 echo "Model:  $MODEL_DIR"
 echo "Output: $OUTPUT"
 echo "Batch:  $BATCH_SIZE"
-
-echo "Swahili split: $SWAHILI_SPLIT | Anv split: $ANV_SPLIT"
+echo "Test:   $TEST_SOURCE ($KAGGLE_TEST_ROOT)"
 
 python scripts/generate_submission.py \
+  --test-source "$TEST_SOURCE" \
+  --kaggle-test-root "$KAGGLE_TEST_ROOT" \
   --work-dir "$WORK_DIR" \
   --model-dir "$MODEL_DIR" \
   --output "$OUTPUT" \
