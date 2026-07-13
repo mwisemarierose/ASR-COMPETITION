@@ -34,14 +34,17 @@ from src.whisper_dataset import (  # noqa: E402
     TrainingRecord,
     collect_kaggle_nt_test_records,
     collect_records,
-    load_submission_id_order,
+    load_submission_template,
     set_forced_language_prompt,
+    submission_language_code,
     summarize_records,
     try_load_record_audio,
 )
 
 MAX_AUDIO_SECONDS = 30.0
 GENERATION_MAX_LENGTH = 225
+# Kaggle rejects empty transcription cells as null values.
+FAILED_AUDIO_PLACEHOLDER = "."
 
 
 def parse_args() -> argparse.Namespace:
@@ -111,7 +114,12 @@ def parse_args() -> argparse.Namespace:
         default=False,
         help="Force per-language decoder prompts at inference (epoch-2+ models).",
     )
-    parser.add_argument("--id-column", default="ID", help="Submission ID column name.")
+    parser.add_argument("--id-column", default="id", help="Submission ID column name.")
+    parser.add_argument(
+        "--language-column",
+        default="language",
+        help="Submission language column name.",
+    )
     parser.add_argument(
         "--text-column",
         default="transcription",
@@ -185,9 +193,10 @@ def transcribe_language_batch(
     audio_workers: int,
     device: torch.device,
     autocast_dtype: torch.dtype | None,
-) -> list[tuple[str, str]]:
-    outputs: list[tuple[str, str]] = []
+) -> list[tuple[str, str, str]]:
+    outputs: list[tuple[str, str, str]] = []
     skipped_audio = 0
+    language_code = submission_language_code(records[0].language) if records else "swa"
 
     for start in tqdm(range(0, len(records), batch_size), desc="  batches", leave=False):
         batch_records = records[start : start + batch_size]
@@ -196,7 +205,7 @@ def transcribe_language_batch(
         for record, audio in load_batch_audio(batch_records, max_audio_seconds, audio_workers):
             if audio is None:
                 skipped_audio += 1
-                outputs.append((record.key, ""))
+                outputs.append((record.key, language_code, FAILED_AUDIO_PLACEHOLDER))
                 continue
             pending.append((record, audio))
 
@@ -234,7 +243,7 @@ def transcribe_language_batch(
             clean_up_tokenization_spaces=False,
         )
         for (record, _), text in zip(pending, texts):
-            outputs.append((record.key, text.strip()))
+            outputs.append((record.key, language_code, text.strip()))
 
     if skipped_audio:
         print(f"  skipped {skipped_audio} clip(s) with unreadable audio", flush=True)
@@ -242,10 +251,11 @@ def transcribe_language_batch(
 
 
 def write_submission(
-    rows: list[tuple[str, str]],
+    rows: list[tuple[str, str, str]],
     output_path: Path,
     *,
     id_column: str,
+    language_column: str,
     text_column: str,
 ) -> None:
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -253,7 +263,7 @@ def write_submission(
     if suffix == ".parquet":
         import pandas as pd
 
-        frame = pd.DataFrame(rows, columns=[id_column, text_column])
+        frame = pd.DataFrame(rows, columns=[id_column, language_column, text_column])
         frame.to_parquet(output_path, index=False)
         return
     if suffix != ".csv":
@@ -262,8 +272,8 @@ def write_submission(
     import csv
 
     with output_path.open("w", encoding="utf-8", newline="") as handle:
-        writer = csv.writer(handle)
-        writer.writerow([id_column, text_column])
+        writer = csv.writer(handle, lineterminator="\n")
+        writer.writerow([id_column, language_column, text_column])
         writer.writerows(rows)
 
 
@@ -291,22 +301,25 @@ def collect_test_records(args: argparse.Namespace) -> list[TrainingRecord]:
 
 
 def order_submission_rows(
-    rows: list[tuple[str, str]],
+    rows: list[tuple[str, str, str]],
     *,
-    id_order: list[str] | None,
-) -> list[tuple[str, str]]:
-    if not id_order:
+    template: list[tuple[str, str]] | None,
+) -> list[tuple[str, str, str]]:
+    if not template:
         rows.sort(key=lambda item: item[0])
         return rows
 
-    by_id = dict(rows)
-    ordered: list[tuple[str, str]] = []
+    by_id = {clip_id: (language, transcription) for clip_id, language, transcription in rows}
+    ordered: list[tuple[str, str, str]] = []
     missing_ids: list[str] = []
-    for clip_id in id_order:
-        if clip_id in by_id:
-            ordered.append((clip_id, by_id.pop(clip_id)))
-        else:
+    for clip_id, language in template:
+        prediction = by_id.pop(clip_id, None)
+        if prediction is None:
             missing_ids.append(clip_id)
+            ordered.append((clip_id, language, FAILED_AUDIO_PLACEHOLDER))
+            continue
+        predicted_language, transcription = prediction
+        ordered.append((clip_id, language, transcription))
 
     if missing_ids:
         print(
@@ -318,7 +331,10 @@ def order_submission_rows(
             f"WARNING: {len(by_id)} predicted ID(s) not in sample_submission; appending at end.",
             file=sys.stderr,
         )
-        ordered.extend(sorted(by_id.items(), key=lambda item: item[0]))
+        ordered.extend(
+            (clip_id, language, transcription)
+            for clip_id, (language, transcription) in sorted(by_id.items(), key=lambda item: item[0])
+        )
     return ordered
 
 
@@ -380,7 +396,7 @@ def main() -> int:
     model.to(device)
     model.eval()
 
-    submission_rows: list[tuple[str, str]] = []
+    submission_rows: list[tuple[str, str, str]] = []
     languages = sorted({record.language for record in test_records})
     for language in languages:
         subset = [record for record in test_records if record.language == language]
@@ -402,17 +418,18 @@ def main() -> int:
         )
         submission_rows.extend(lang_rows)
 
-    id_order = None
+    template = None
     if args.test_source == "kaggle_nt":
-        id_order = load_submission_id_order(args.kaggle_test_root.resolve(), args.id_column)
-        if id_order:
-            print(f"Ordering rows to match sample_submission ({len(id_order)} IDs)")
+        template = load_submission_template(args.kaggle_test_root.resolve(), id_column=args.id_column)
+        if template:
+            print(f"Ordering rows to match sample_submission ({len(template)} IDs)")
 
-    submission_rows = order_submission_rows(submission_rows, id_order=id_order)
+    submission_rows = order_submission_rows(submission_rows, template=template)
     write_submission(
         submission_rows,
         output_path,
         id_column=args.id_column,
+        language_column=args.language_column,
         text_column=args.text_column,
     )
 

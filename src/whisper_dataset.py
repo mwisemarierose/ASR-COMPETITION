@@ -43,6 +43,27 @@ KAGGLE_NT_LANGUAGE_DIRS: dict[str, str] = {
 }
 KAGGLE_NT_STYLE_DIRS = ("Scripted", "Unscripted")
 
+# Competition submission uses 3-letter dataset folder codes (not full language names).
+SUBMISSION_LANGUAGE_CODES: dict[str, str] = {
+    "swahili": "swa",
+    "kikuyu": "kik",
+    "dholuo": "luo",
+    "luo": "luo",
+    "somali": "som",
+    "maasai": "mas",
+    "kalenjin": "kln",
+}
+
+
+def submission_language_code(language: str) -> str:
+    """Map internal language name to Kaggle submission code."""
+    normalized = language.strip().lower()
+    if normalized in SUBMISSION_LANGUAGE_CODES:
+        return SUBMISSION_LANGUAGE_CODES[normalized]
+    if normalized in KAGGLE_NT_LANGUAGE_DIRS:
+        return normalized
+    raise ValueError(f"Unknown submission language: {language}")
+
 
 @dataclass(frozen=True)
 class TrainingRecord:
@@ -250,8 +271,68 @@ def collect_kaggle_nt_test_records(
     return records
 
 
-def load_submission_id_order(test_root: Path, id_column: str = "ID") -> list[str] | None:
+def _resolve_submission_column(fieldnames: list[str], *candidates: str) -> str | None:
+    for candidate in candidates:
+        if candidate in fieldnames:
+            return candidate
+    lowered = {name.lower(): name for name in fieldnames}
+    for candidate in candidates:
+        match = lowered.get(candidate.lower())
+        if match:
+            return match
+    return None
+
+
+def load_submission_id_order(test_root: Path, id_column: str = "id") -> list[str] | None:
     """Return clip IDs from sample_submission.* if present in the Kaggle bundle."""
+    template = load_submission_template(test_root, id_column=id_column)
+    if template is None:
+        return None
+    return [clip_id for clip_id, _ in template]
+
+
+def load_submission_template_file(path: Path) -> list[tuple[str, str]] | None:
+    """Return (id, language) rows from an explicit sample_submission file."""
+    path = path.resolve()
+    if not path.is_file():
+        return None
+    if path.suffix.lower() == ".csv":
+        import csv
+
+        with path.open(encoding="utf-8", newline="") as handle:
+            reader = csv.DictReader(handle)
+            fieldnames = reader.fieldnames or []
+            resolved_id = _resolve_submission_column(fieldnames, "id", "ID")
+            resolved_language = _resolve_submission_column(fieldnames, "language", "lang")
+            if resolved_id is None or resolved_language is None:
+                return None
+            return [
+                (str(row[resolved_id]).strip(), str(row[resolved_language]).strip())
+                for row in reader
+                if row.get(resolved_id) and row.get(resolved_language)
+            ]
+
+    import pandas as pd
+
+    frame = pd.read_parquet(path)
+    resolved_id = _resolve_submission_column(list(frame.columns), "id", "ID")
+    resolved_language = _resolve_submission_column(list(frame.columns), "language", "lang")
+    if resolved_id is None or resolved_language is None:
+        return None
+    return [
+        (str(clip_id).strip(), str(language).strip())
+        for clip_id, language in zip(frame[resolved_id], frame[resolved_language])
+        if str(clip_id).strip() and str(language).strip()
+    ]
+
+
+def load_submission_template(
+    test_root: Path,
+    *,
+    id_column: str = "id",
+    language_column: str = "language",
+) -> list[tuple[str, str]] | None:
+    """Return (id, language) rows from sample_submission.* in the Kaggle bundle."""
     for name in ("sample_submission.csv", "sample_submission.parquet"):
         path = test_root / name
         if not path.is_file():
@@ -261,17 +342,58 @@ def load_submission_id_order(test_root: Path, id_column: str = "ID") -> list[str
 
             with path.open(encoding="utf-8", newline="") as handle:
                 reader = csv.DictReader(handle)
-                if reader.fieldnames and id_column not in reader.fieldnames:
+                fieldnames = reader.fieldnames or []
+                resolved_id = _resolve_submission_column(
+                    fieldnames,
+                    id_column,
+                    "id",
+                    "ID",
+                )
+                resolved_language = _resolve_submission_column(
+                    fieldnames,
+                    language_column,
+                    "language",
+                    "lang",
+                )
+                if resolved_id is None or resolved_language is None:
                     return None
-                return [str(row[id_column]).strip() for row in reader if row.get(id_column)]
+                return [
+                    (str(row[resolved_id]).strip(), str(row[resolved_language]).strip())
+                    for row in reader
+                    if row.get(resolved_id) and row.get(resolved_language)
+                ]
 
         import pandas as pd
 
         frame = pd.read_parquet(path)
-        if id_column not in frame.columns:
+        resolved_id = _resolve_submission_column(
+            list(frame.columns),
+            id_column,
+            "id",
+            "ID",
+        )
+        resolved_language = _resolve_submission_column(
+            list(frame.columns),
+            language_column,
+            "language",
+            "lang",
+        )
+        if resolved_id is None or resolved_language is None:
             return None
-        return [str(value).strip() for value in frame[id_column].tolist()]
+        return [
+            (str(clip_id).strip(), str(language).strip())
+            for clip_id, language in zip(frame[resolved_id], frame[resolved_language])
+            if str(clip_id).strip() and str(language).strip()
+        ]
     return None
+
+
+def build_submission_language_map(test_root: Path) -> dict[str, str]:
+    """Map clip id -> submission language code from the Kaggle test bundle."""
+    return {
+        record.key: submission_language_code(record.language)
+        for record in collect_kaggle_nt_test_records(test_root)
+    }
 
 
 def collect_records(

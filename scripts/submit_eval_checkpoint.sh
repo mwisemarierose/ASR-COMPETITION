@@ -7,7 +7,7 @@ set -euo pipefail
 
 cd ~/ASR-COMPETITION
 mkdir -p logs
-chmod +x scripts/run_eval_checkpoint.sh
+chmod +x scripts/run_eval_checkpoint.sh scripts/submit_eval_checkpoint.sh
 
 JOBID=$(sbatch --parsable \
   --export=ALL \
