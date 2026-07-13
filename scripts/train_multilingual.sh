@@ -14,7 +14,7 @@
 #   OUTPUT_DIR=.../multilingual_job_125891 RESUME=1 ./scripts/submit_multilingual_train.sh
 #
 # Epoch 2 (load epoch-1 weights only — do NOT use RESUME=1):
-#   PHASE=epoch2 INIT_FROM=/project/.../multilingual_job_125891/final ./scripts/submit_multilingual_epoch2.sh
+#   PHASE=epoch2 INIT_FROM=/project/.../multilingual_job_125891/checkpoint-12500 ./scripts/submit_multilingual_epoch2.sh
 #
 # Epochs (EPOCHS env var):
 #   EPOCHS=1 ./scripts/submit_multilingual_train.sh   # one epoch (~13k steps)
@@ -59,7 +59,7 @@ case "$PHASE" in
     ALIGN_ARGS=()
     ;;
   epoch2)
-    MODEL_NAME="${MODEL_NAME:-${INIT_FROM:-$WORK_DIR/whisper_runs/multilingual_job_125891/final}}"
+    MODEL_NAME="${MODEL_NAME:-${INIT_FROM:-$WORK_DIR/whisper_runs/multilingual_job_125891/checkpoint-12500}}"
     LEARNING_RATE="${LEARNING_RATE:-5e-6}"
     WARMUP_STEPS="${WARMUP_STEPS:-500}"
     TRAIN_BATCH_SIZE="${TRAIN_BATCH_SIZE:-32}"
