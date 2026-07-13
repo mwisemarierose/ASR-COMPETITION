@@ -191,19 +191,12 @@ def load_parquet_row_audio_bytes(parquet_path: Path, row_index: int) -> bytes:
         n_rows = pf.metadata.row_group(rg).num_rows
         if row_index < cumulative + n_rows:
             local_idx = row_index - cumulative
-            for batch in pf.iter_batches(
-                batch_size=1,
-                row_groups=[rg],
-                columns=[audio_col],
-            ):
-                if local_idx == 0:
-                    audio_value = batch.column(0)[0].as_py()
-                    audio_bytes = audio_bytes_from_struct(audio_value)
-                    if not audio_bytes:
-                        raise RuntimeError(f"Missing audio bytes at {parquet_path}:{row_index}")
-                    return audio_bytes
-                local_idx -= 1
-            break
+            table = pf.read_row_group(rg, columns=[audio_col])
+            audio_value = table.column(0)[local_idx].as_py()
+            audio_bytes = audio_bytes_from_struct(audio_value)
+            if not audio_bytes:
+                raise RuntimeError(f"Missing audio bytes at {parquet_path}:{row_index}")
+            return audio_bytes
         cumulative += n_rows
 
     raise RuntimeError(f"Row {row_index} out of range for {parquet_path}")
