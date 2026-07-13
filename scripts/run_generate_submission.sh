@@ -18,7 +18,9 @@ export TEST_SOURCE="${TEST_SOURCE:-kaggle_nt}"
 
 MODEL_DIR="${MODEL_DIR:-$WORK_DIR/whisper_runs/multilingual_job_125891/checkpoint-12500}"
 OUTPUT="${OUTPUT:-$WORK_DIR/whisper_runs/submission_checkpoint-12500.csv}"
-BATCH_SIZE="${BATCH_SIZE:-8}"
+BATCH_SIZE="${BATCH_SIZE:-16}"
+AUDIO_WORKERS="${AUDIO_WORKERS:-8}"
+INFER_DTYPE="${INFER_DTYPE:-auto}"
 FORCE_LANG_PROMPTS="${FORCE_LANG_PROMPTS:-0}"
 SWAHILI_SPLIT="${SWAHILI_SPLIT:-test}"
 ANV_SPLIT="${ANV_SPLIT:-dev_test}"
@@ -37,6 +39,8 @@ echo "=== Generate submission ==="
 echo "Model:  $MODEL_DIR"
 echo "Output: $OUTPUT"
 echo "Batch:  $BATCH_SIZE"
+echo "Audio workers: $AUDIO_WORKERS"
+echo "Dtype:  $INFER_DTYPE"
 echo "Test:   $TEST_SOURCE ($KAGGLE_TEST_ROOT)"
 
 python scripts/generate_submission.py \
@@ -48,6 +52,8 @@ python scripts/generate_submission.py \
   --swahili-split "$SWAHILI_SPLIT" \
   --anv-split "$ANV_SPLIT" \
   --batch-size "$BATCH_SIZE" \
+  --audio-workers "$AUDIO_WORKERS" \
+  --dtype "$INFER_DTYPE" \
   --expected-rows 41733 \
   "${PROMPT_ARGS[@]}" \
   "$@"

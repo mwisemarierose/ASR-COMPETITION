@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
@@ -91,6 +92,18 @@ def parse_args() -> argparse.Namespace:
         help="Manifest split for Anv languages (under cleaned/{language}/).",
     )
     parser.add_argument("--batch-size", type=int, default=8)
+    parser.add_argument(
+        "--audio-workers",
+        type=int,
+        default=int(os.environ.get("AUDIO_WORKERS", "8")),
+        help="Parallel CPU workers for parquet read + audio decode (main speed lever).",
+    )
+    parser.add_argument(
+        "--dtype",
+        choices=("auto", "bf16", "fp16", "fp32"),
+        default=os.environ.get("INFER_DTYPE", "auto"),
+        help="GPU inference dtype (auto=bf16 on CUDA).",
+    )
     parser.add_argument("--max-audio-seconds", type=float, default=MAX_AUDIO_SECONDS)
     parser.add_argument(
         "--force-language-prompts",
@@ -128,6 +141,40 @@ def load_audio_for_record(record: TrainingRecord, max_audio_seconds: float) -> d
     return audio
 
 
+def resolve_autocast_dtype(device: torch.device, dtype: str) -> torch.dtype | None:
+    if device.type != "cuda":
+        return None
+    if dtype == "fp32":
+        return None
+    if dtype == "fp16":
+        return torch.float16
+    if dtype == "bf16":
+        return torch.bfloat16
+    # auto: bf16 on Ampere+ (H100), else fp16
+    if torch.cuda.is_bf16_supported():
+        return torch.bfloat16
+    return torch.float16
+
+
+def load_batch_audio(
+    batch_records: list[TrainingRecord],
+    max_audio_seconds: float,
+    audio_workers: int,
+) -> list[tuple[TrainingRecord, dict[str, Any] | None]]:
+    if audio_workers <= 1 or len(batch_records) <= 1:
+        return [
+            (record, load_audio_for_record(record, max_audio_seconds))
+            for record in batch_records
+        ]
+
+    with ThreadPoolExecutor(max_workers=min(audio_workers, len(batch_records))) as pool:
+        audios = pool.map(
+            lambda record: load_audio_for_record(record, max_audio_seconds),
+            batch_records,
+        )
+    return list(zip(batch_records, audios))
+
+
 def transcribe_language_batch(
     model: WhisperForConditionalGeneration,
     processor: WhisperProcessor,
@@ -135,7 +182,9 @@ def transcribe_language_batch(
     *,
     batch_size: int,
     max_audio_seconds: float,
+    audio_workers: int,
     device: torch.device,
+    autocast_dtype: torch.dtype | None,
 ) -> list[tuple[str, str]]:
     outputs: list[tuple[str, str]] = []
     skipped_audio = 0
@@ -144,8 +193,7 @@ def transcribe_language_batch(
         batch_records = records[start : start + batch_size]
         pending: list[tuple[TrainingRecord, dict[str, Any]]] = []
 
-        for record in batch_records:
-            audio = load_audio_for_record(record, max_audio_seconds)
+        for record, audio in load_batch_audio(batch_records, max_audio_seconds, audio_workers):
             if audio is None:
                 skipped_audio += 1
                 outputs.append((record.key, ""))
@@ -168,12 +216,23 @@ def transcribe_language_batch(
         batch = {key: value.to(device) for key, value in batch.items()}
 
         with torch.inference_mode():
-            generated = model.generate(
-                batch["input_features"],
-                max_length=GENERATION_MAX_LENGTH,
-            )
+            if autocast_dtype is not None:
+                with torch.autocast(device_type=device.type, dtype=autocast_dtype):
+                    generated = model.generate(
+                        batch["input_features"],
+                        max_length=GENERATION_MAX_LENGTH,
+                    )
+            else:
+                generated = model.generate(
+                    batch["input_features"],
+                    max_length=GENERATION_MAX_LENGTH,
+                )
 
-        texts = processor.batch_decode(generated, skip_special_tokens=True)
+        texts = processor.batch_decode(
+            generated,
+            skip_special_tokens=True,
+            clean_up_tokenization_spaces=False,
+        )
         for (record, _), text in zip(pending, texts):
             outputs.append((record.key, text.strip()))
 
@@ -303,8 +362,15 @@ def main() -> int:
         return 1
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    autocast_dtype = resolve_autocast_dtype(device, args.dtype)
     print(f"Device: {device}")
     print(f"Model: {model_dir}")
+    print(f"Batch size: {args.batch_size}")
+    print(f"Audio workers: {args.audio_workers}")
+    print(
+        f"Inference dtype: {args.dtype}"
+        + (f" (autocast {autocast_dtype})" if autocast_dtype is not None else " (fp32)")
+    )
     print(f"Force language prompts: {args.force_language_prompts}")
 
     processor = WhisperProcessor.from_pretrained(str(model_dir))
@@ -330,7 +396,9 @@ def main() -> int:
             subset,
             batch_size=args.batch_size,
             max_audio_seconds=args.max_audio_seconds,
+            audio_workers=args.audio_workers,
             device=device,
+            autocast_dtype=autocast_dtype,
         )
         submission_rows.extend(lang_rows)
 
