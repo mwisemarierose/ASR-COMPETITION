@@ -4,6 +4,7 @@ Audio decoding for file-based (Afrivoice) and Parquet-embedded (Anv-ke) clips.
 from __future__ import annotations
 
 import io
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -121,8 +122,54 @@ def audio_bytes_from_struct(audio_value: Any) -> bytes | None:
     return None
 
 
+def _decode_audio_bytes_with_ffmpeg(
+    audio_bytes: bytes,
+    sample_rate: int = SAMPLE_RATE,
+) -> np.ndarray:
+    """Last-resort decode via ffmpeg subprocess (handles formats PyAV/librosa miss)."""
+    ffmpeg = configure_ffmpeg()
+    if not ffmpeg:
+        raise RuntimeError("ffmpeg not available")
+
+    proc = subprocess.run(
+        [
+            ffmpeg,
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-i",
+            "pipe:0",
+            "-f",
+            "s16le",
+            "-acodec",
+            "pcm_s16le",
+            "-ac",
+            "1",
+            "-ar",
+            str(sample_rate),
+            "pipe:1",
+        ],
+        input=audio_bytes,
+        capture_output=True,
+        check=False,
+    )
+    if proc.returncode != 0 or not proc.stdout:
+        err = proc.stderr.decode("utf-8", errors="replace").strip()
+        raise RuntimeError(f"ffmpeg decode failed: {err or 'no output'}")
+
+    audio = np.frombuffer(proc.stdout, dtype=np.int16).astype(np.float32) / 32768.0
+    if audio.size == 0:
+        raise RuntimeError("ffmpeg decode produced no samples")
+    return audio
+
+
 def _decode_audio_bytes(audio_bytes: bytes, sample_rate: int = SAMPLE_RATE) -> np.ndarray:
-    """Decode embedded audio bytes; prefer soundfile/librosa before PyAV."""
+    """Decode embedded audio bytes; try soundfile, librosa, PyAV, then ffmpeg."""
+    if not audio_bytes:
+        raise RuntimeError("Empty audio bytes")
+
+    errors: list[str] = []
+
     if audio_bytes[:4] in (b"RIFF", b"fLaC", b"OggS") or audio_bytes[:3] == b"ID3":
         try:
             audio, file_sr = sf.read(io.BytesIO(audio_bytes), dtype="float32", always_2d=False)
@@ -132,22 +179,18 @@ def _decode_audio_bytes(audio_bytes: bytes, sample_rate: int = SAMPLE_RATE) -> n
             if file_sr != sample_rate:
                 audio = librosa.resample(audio, orig_sr=file_sr, target_sr=sample_rate)
             return audio
-        except Exception:
-            pass
+        except Exception as exc:
+            errors.append(f"soundfile: {exc}")
 
     try:
-        audio, file_sr = librosa.load(io.BytesIO(audio_bytes), sr=sample_rate, mono=True)
+        audio, _file_sr = librosa.load(io.BytesIO(audio_bytes), sr=sample_rate, mono=True)
         return np.asarray(audio, dtype=np.float32)
-    except Exception:
-        pass
-
-    if not audio_bytes:
-        raise RuntimeError("Empty audio bytes")
-
-    resampler = av.AudioResampler(format="flt", layout="mono", rate=sample_rate)
-    chunks: list[np.ndarray] = []
+    except Exception as exc:
+        errors.append(f"librosa: {exc}")
 
     try:
+        resampler = av.AudioResampler(format="flt", layout="mono", rate=sample_rate)
+        chunks: list[np.ndarray] = []
         with av.open(io.BytesIO(audio_bytes), metadata_errors="ignore") as container:
             if not container.streams.audio:
                 raise RuntimeError("No audio stream in parquet bytes")
@@ -158,13 +201,19 @@ def _decode_audio_bytes(audio_bytes: bytes, sample_rate: int = SAMPLE_RATE) -> n
 
             for resampled in resampler.resample(None):
                 chunks.append(_frame_to_mono_float32(resampled))
-    except av.error.FFmpegError as exc:
-        raise RuntimeError(f"Cannot decode parquet audio bytes: {exc}") from exc
 
-    if not chunks:
-        raise RuntimeError("No audio frames decoded from parquet bytes")
+        if chunks:
+            return np.concatenate(chunks).astype(np.float32, copy=False)
+        errors.append("pyav: no audio frames decoded")
+    except Exception as exc:
+        errors.append(f"pyav: {exc}")
 
-    return np.concatenate(chunks).astype(np.float32, copy=False)
+    try:
+        return _decode_audio_bytes_with_ffmpeg(audio_bytes, sample_rate=sample_rate)
+    except Exception as exc:
+        errors.append(f"ffmpeg: {exc}")
+
+    raise RuntimeError("Cannot decode parquet audio bytes (" + "; ".join(errors) + ")")
 
 
 def duration_from_audio_bytes(audio_bytes: bytes, sample_rate: int = SAMPLE_RATE) -> float:
