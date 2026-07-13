@@ -71,6 +71,8 @@ def iter_swahili_records(
     work_dir: Path,
     split: str,
     domains: tuple[str, ...] = DOMAINS,
+    *,
+    require_transcript: bool = True,
 ) -> Iterator[TrainingRecord]:
     for domain in domains:
         manifest_path = _swahili_manifest_path(work_dir, domain, split)
@@ -79,7 +81,9 @@ def iter_swahili_records(
         for row in _load_jsonl(manifest_path):
             transcript = str(row.get("transcript") or "").strip()
             audio_path = str(row.get("audio_path") or "").strip()
-            if not transcript or not audio_path:
+            if require_transcript and not transcript:
+                continue
+            if not audio_path:
                 continue
             key = str(row.get("key") or Path(audio_path).stem)
             yield TrainingRecord(
@@ -98,6 +102,7 @@ def iter_anv_records(
     languages: tuple[str, ...] = COMPETITION_ANV_LANGUAGES,
     *,
     skip_maasai_scripted_train: bool = True,
+    require_transcript: bool = True,
 ) -> Iterator[TrainingRecord]:
     for language in languages:
         for style in ANV_STYLES:
@@ -109,7 +114,9 @@ def iter_anv_records(
             for row in _load_jsonl(manifest_path):
                 transcript = str(row.get("transcript") or "").strip()
                 audio_source = row.get("audio_source")
-                if not transcript or not isinstance(audio_source, dict):
+                if require_transcript and not transcript:
+                    continue
+                if not isinstance(audio_source, dict):
                     continue
                 if audio_source.get("type") != "parquet":
                     continue
@@ -133,6 +140,7 @@ def collect_records(
     include_swahili: bool = True,
     include_anv: bool = True,
     skip_maasai_scripted_train: bool = True,
+    require_transcript: bool = True,
     max_samples: int | None = None,
     max_samples_per_source: int | None = None,
     seed: int = 42,
@@ -140,7 +148,14 @@ def collect_records(
     records: list[TrainingRecord] = []
 
     if include_swahili:
-        records.extend(iter_swahili_records(work_dir, split, domains=swahili_domains))
+        records.extend(
+            iter_swahili_records(
+                work_dir,
+                split,
+                domains=swahili_domains,
+                require_transcript=require_transcript,
+            )
+        )
     if include_anv:
         records.extend(
             iter_anv_records(
@@ -148,6 +163,7 @@ def collect_records(
                 split,
                 languages=anv_languages,
                 skip_maasai_scripted_train=skip_maasai_scripted_train,
+                require_transcript=require_transcript,
             )
         )
 
@@ -355,3 +371,20 @@ def summarize_records(records: list[TrainingRecord]) -> dict[str, int]:
 
 def whisper_language_code(language: str) -> str | None:
     return WHISPER_LANGUAGE_CODES.get(language.lower())
+
+
+def decoder_prompt_token_ids(processor: Any, language: str) -> list[int]:
+    """Return Whisper decoder prompt token ids for a competition language."""
+    lang_code = whisper_language_code(language)
+    forced = processor.get_decoder_prompt_ids(language=lang_code, task="transcribe")
+    return [token_id for _, token_id in forced]
+
+
+def set_forced_language_prompt(model: Any, processor: Any, language: str) -> None:
+    """Force language/task tokens during generation for one language."""
+    lang_code = whisper_language_code(language)
+    model.config.forced_decoder_ids = processor.get_decoder_prompt_ids(
+        language=lang_code,
+        task="transcribe",
+    )
+    model.config.suppress_tokens = []

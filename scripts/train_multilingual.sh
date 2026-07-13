@@ -10,8 +10,11 @@
 #   equal  — same count per language (uses only 28k each)
 #   none   — use all 970k clips (Swahili dominates ~54%)
 #
-# Resume:
-#   OUTPUT_DIR=.../multilingual_v1_... RESUME=1 sbatch ... scripts/train_multilingual.sh
+# Resume epoch 1 (same OUTPUT_DIR, same data):
+#   OUTPUT_DIR=.../multilingual_job_125891 RESUME=1 ./scripts/submit_multilingual_train.sh
+#
+# Epoch 2 (load epoch-1 weights only — do NOT use RESUME=1):
+#   PHASE=epoch2 INIT_FROM=/project/.../multilingual_job_125891/final ./scripts/submit_multilingual_epoch2.sh
 #
 # Epochs (EPOCHS env var):
 #   EPOCHS=1 ./scripts/submit_multilingual_train.sh   # one epoch (~13k steps)
@@ -36,18 +39,60 @@ if [[ -f "$SECRETS_FILE" ]]; then
   source "$SECRETS_FILE"
 fi
 
+PHASE="${PHASE:-epoch1}"
 BALANCE="${BALANCE:-cap}"
 MAX_PER_LANGUAGE="${MAX_PER_LANGUAGE:-80000}"
 EPOCHS="${EPOCHS:-1}"
 
+case "$PHASE" in
+  epoch1)
+    MODEL_NAME="${MODEL_NAME:-openai/whisper-small}"
+    LEARNING_RATE="${LEARNING_RATE:-1e-5}"
+    WARMUP_STEPS="${WARMUP_STEPS:-1000}"
+    TRAIN_BATCH_SIZE="${TRAIN_BATCH_SIZE:-8}"
+    EVAL_BATCH_SIZE="${EVAL_BATCH_SIZE:-8}"
+    GRAD_ACCUM="${GRAD_ACCUM:-4}"
+    SAVE_STEPS="${SAVE_STEPS:-500}"
+    PER_LANG_EVAL_STEPS="${PER_LANG_EVAL_STEPS:-500}"
+    DATALOADER_WORKERS="${DATALOADER_WORKERS:-4}"
+    LANG_PROMPT_ARGS=()
+    ALIGN_ARGS=()
+    ;;
+  epoch2)
+    MODEL_NAME="${MODEL_NAME:-${INIT_FROM:-$WORK_DIR/whisper_runs/multilingual_job_125891/final}}"
+    LEARNING_RATE="${LEARNING_RATE:-5e-6}"
+    WARMUP_STEPS="${WARMUP_STEPS:-500}"
+    TRAIN_BATCH_SIZE="${TRAIN_BATCH_SIZE:-8}"
+    EVAL_BATCH_SIZE="${EVAL_BATCH_SIZE:-8}"
+    GRAD_ACCUM="${GRAD_ACCUM:-4}"
+    SAVE_STEPS="${SAVE_STEPS:-500}"
+    PER_LANG_EVAL_STEPS="${PER_LANG_EVAL_STEPS:-500}"
+    DATALOADER_WORKERS="${DATALOADER_WORKERS:-7}"
+    LANG_PROMPT_ARGS=(--force-language-prompts)
+    ALIGN_ARGS=()
+    ;;
+  *)
+    echo "ERROR: unknown PHASE=$PHASE (expected epoch1 or epoch2)" >&2
+    exit 1
+    ;;
+esac
+
 # Stable output dir across SLURM requeues on the preempt partition.
 if [[ -z "${OUTPUT_DIR:-}" && -n "${SLURM_JOB_ID:-}" ]]; then
-  export OUTPUT_DIR="$WORK_DIR/whisper_runs/multilingual_job_${SLURM_JOB_ID}"
+  if [[ "$PHASE" == "epoch2" ]]; then
+    export OUTPUT_DIR="$WORK_DIR/whisper_runs/multilingual_epoch2_${SLURM_JOB_ID}"
+  else
+    export OUTPUT_DIR="$WORK_DIR/whisper_runs/multilingual_job_${SLURM_JOB_ID}"
+  fi
 fi
 
 RUN_TAG="$(date +%Y%m%d-%H%M%S)"
-export OUTPUT_DIR="${OUTPUT_DIR:-$WORK_DIR/whisper_runs/multilingual_v1_${RUN_TAG}}"
-export WANDB_RUN_NAME="${WANDB_RUN_NAME:-multilingual-v1-${SLURM_JOB_ID:-${RUN_TAG}}}"
+if [[ "$PHASE" == "epoch2" && -z "${OUTPUT_DIR:-}" ]]; then
+  export OUTPUT_DIR="$WORK_DIR/whisper_runs/multilingual_epoch2_${RUN_TAG}"
+else
+  export OUTPUT_DIR="${OUTPUT_DIR:-$WORK_DIR/whisper_runs/multilingual_v1_${RUN_TAG}}"
+fi
+export WANDB_RUN_NAME="${WANDB_RUN_NAME:-multilingual-${PHASE}-${SLURM_JOB_ID:-${RUN_TAG}}}"
 
 mkdir -p "$HF_HOME" "$WORK_DIR/whisper_runs" "$OUTPUT_DIR"
 cd ~/ASR-COMPETITION
@@ -58,11 +103,16 @@ if [[ "$BALANCE" == "cap" ]]; then
 fi
 
 echo "=== Multilingual training (one model) ==="
+echo "Phase: $PHASE"
+echo "Model: $MODEL_NAME"
 echo "Balance mode: $BALANCE"
 echo "Epochs: $EPOCHS"
+echo "Learning rate: $LEARNING_RATE"
+echo "Train batch / grad accum: $TRAIN_BATCH_SIZE / $GRAD_ACCUM (effective $((TRAIN_BATCH_SIZE * GRAD_ACCUM)))"
+echo "DataLoader workers: $DATALOADER_WORKERS"
 echo "Output: $OUTPUT_DIR"
 if [[ -n "${SLURM_JOB_ID:-}" ]]; then
-  echo "SLURM job: $SLURM_JOB_ID (requeue-safe output dir)"
+  echo "SLURM job: $SLURM_JOB_ID"
 fi
 
 echo "=== GPU check ==="
@@ -76,37 +126,43 @@ python scripts/finetune_whisper.py \
   "${BALANCE_ARGS[@]}"
 
 RESUME_ARGS=()
-if [[ "${RESUME:-0}" == "1" ]]; then
-  RESUME_ARGS=(--resume-from-checkpoint)
-  echo "=== Resuming from latest checkpoint in $OUTPUT_DIR ==="
-elif compgen -G "$OUTPUT_DIR/checkpoint-*" > /dev/null; then
-  RESUME_ARGS=(--resume-from-checkpoint)
-  echo "=== Auto-resuming from latest checkpoint in $OUTPUT_DIR (SLURM requeue) ==="
+if [[ "$PHASE" == "epoch1" ]]; then
+  if [[ "${RESUME:-0}" == "1" ]]; then
+    RESUME_ARGS=(--resume-from-checkpoint)
+    echo "=== Resuming from latest checkpoint in $OUTPUT_DIR ==="
+  elif compgen -G "$OUTPUT_DIR/checkpoint-*" > /dev/null; then
+    RESUME_ARGS=(--resume-from-checkpoint)
+    echo "=== Auto-resuming from latest checkpoint in $OUTPUT_DIR (SLURM requeue) ==="
+  fi
+else
+  echo "=== Epoch 2: loading weights from $MODEL_NAME (fresh optimizer, no RESUME) ==="
 fi
 
 python scripts/finetune_whisper.py \
   --work-dir "$WORK_DIR" \
   --output-dir "$OUTPUT_DIR" \
-  --model-name openai/whisper-small \
+  --model-name "$MODEL_NAME" \
   --num-train-epochs "$EPOCHS" \
-  --learning-rate 1e-5 \
-  --warmup-steps 1000 \
-  --per-device-train-batch-size 8 \
-  --per-device-eval-batch-size 8 \
-  --gradient-accumulation-steps 4 \
+  --learning-rate "$LEARNING_RATE" \
+  --warmup-steps "$WARMUP_STEPS" \
+  --per-device-train-batch-size "$TRAIN_BATCH_SIZE" \
+  --per-device-eval-batch-size "$EVAL_BATCH_SIZE" \
+  --gradient-accumulation-steps "$GRAD_ACCUM" \
   --gradient-checkpointing \
-  --save-steps 500 \
-  --per-language-eval-steps 500 \
+  --save-steps "$SAVE_STEPS" \
+  --per-language-eval-steps "$PER_LANG_EVAL_STEPS" \
   --max-eval-samples 2400 \
   --logging-steps 50 \
   --save-total-limit 3 \
-  --dataloader-num-workers 4 \
+  --dataloader-num-workers "$DATALOADER_WORKERS" \
   --report-to wandb tensorboard \
   --wandb-project "$WANDB_PROJECT" \
   --wandb-group "$WANDB_RUN_GROUP" \
   --wandb-run-name "$WANDB_RUN_NAME" \
   --eval-all-languages \
   "${BALANCE_ARGS[@]}" \
+  "${LANG_PROMPT_ARGS[@]}" \
+  "${ALIGN_ARGS[@]}" \
   "${RESUME_ARGS[@]}"
 
 echo "=== Done ==="

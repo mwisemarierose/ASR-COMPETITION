@@ -56,6 +56,9 @@ from src.whisper_dataset import (  # noqa: E402
     summarize_record_durations,
     summarize_records,
     try_load_record_audio,
+    whisper_language_code,
+    set_forced_language_prompt,
+    decoder_prompt_token_ids,
 )
 
 
@@ -75,8 +78,19 @@ class DataCollatorSpeechSeq2SeqWithPadding:
     """Load audio lazily per batch so full multilingual training does not cache every clip."""
 
     processor: WhisperProcessor
+    force_language_prompts: bool = False
+    skip_long_audio: bool = False
     truncated_label_count: int = 0
     capped_audio_count: int = 0
+    skipped_long_audio_count: int = 0
+    _prompt_cache: dict[str, list[int]] | None = None
+
+    def _prompt_ids_for(self, language: str) -> list[int]:
+        if self._prompt_cache is None:
+            self._prompt_cache = {}
+        if language not in self._prompt_cache:
+            self._prompt_cache[language] = decoder_prompt_token_ids(self.processor, language)
+        return self._prompt_cache[language]
 
     def __call__(self, features: list[dict[str, Any]]) -> dict[str, torch.Tensor]:
         input_features: list[dict[str, Any]] = []
@@ -86,6 +100,8 @@ class DataCollatorSpeechSeq2SeqWithPadding:
         for example in features:
             record = record_from_batch_row(example)
             labels = self.processor.tokenizer(record.sentence).input_ids
+            if self.force_language_prompts:
+                labels = self._prompt_ids_for(record.language) + labels
             if len(labels) > WHISPER_MAX_LABEL_LENGTH:
                 self.truncated_label_count += 1
                 if self.truncated_label_count <= 20 or self.truncated_label_count % 100 == 0:
@@ -102,9 +118,18 @@ class DataCollatorSpeechSeq2SeqWithPadding:
 
             audio_array = audio["array"]
             if len(audio_array) > max_audio_samples:
+                duration_sec = len(audio_array) / SAMPLE_RATE
+                if self.skip_long_audio:
+                    self.skipped_long_audio_count += 1
+                    if self.skipped_long_audio_count <= 20 or self.skipped_long_audio_count % 100 == 0:
+                        print(
+                            f"WARNING: skipping long audio ({self.skipped_long_audio_count} total) "
+                            f"key={record.key} {duration_sec:.1f}s > {WHISPER_MAX_AUDIO_SECONDS}s",
+                            flush=True,
+                        )
+                    continue
                 self.capped_audio_count += 1
                 if self.capped_audio_count <= 20 or self.capped_audio_count % 100 == 0:
-                    duration_sec = len(audio_array) / SAMPLE_RATE
                     print(
                         f"WARNING: capping long audio ({self.capped_audio_count} total) "
                         f"key={record.key} {duration_sec:.1f}s -> {WHISPER_MAX_AUDIO_SECONDS}s "
@@ -226,6 +251,22 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dataloader-num-workers", type=int, default=4)
     parser.add_argument("--bf16", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--gradient-checkpointing", action="store_true")
+    parser.add_argument(
+        "--force-language-prompts",
+        action="store_true",
+        help="Prepend per-language decoder prompts in training labels and force them during eval.",
+    )
+    parser.add_argument(
+        "--skip-long-audio",
+        action="store_true",
+        help="Skip train clips longer than --max-train-audio-seconds instead of capping audio only.",
+    )
+    parser.add_argument(
+        "--max-train-audio-seconds",
+        type=float,
+        default=WHISPER_MAX_AUDIO_SECONDS,
+        help="Maximum train clip length before capping or skipping.",
+    )
     parser.add_argument("--report-per-language", action="store_true", default=True)
     parser.add_argument("--no-report-per-language", action="store_false", dest="report_per_language")
     parser.add_argument(
@@ -319,11 +360,13 @@ class PerLanguageEvalCallback(TrainerCallback):
         processor: WhisperProcessor,
         metric: Any,
         eval_every_steps: int,
+        force_language_prompts: bool = False,
     ) -> None:
         self.eval_records = eval_records
         self.processor = processor
         self.metric = metric
         self.eval_every_steps = eval_every_steps
+        self.force_language_prompts = force_language_prompts
         self.trainer: Seq2SeqTrainer | None = None
 
     def bind_trainer(self, trainer: Seq2SeqTrainer) -> None:
@@ -341,6 +384,7 @@ class PerLanguageEvalCallback(TrainerCallback):
                 self.eval_records,
                 self.processor,
                 self.metric,
+                force_language_prompts=self.force_language_prompts,
             )
         except Exception as exc:
             print(f"WARNING: per-language eval failed ({exc})", file=sys.stderr)
@@ -426,13 +470,20 @@ def evaluate_per_language(
     eval_records: list[TrainingRecord],
     processor: WhisperProcessor,
     metric: Any,
+    *,
+    force_language_prompts: bool = False,
 ) -> dict[str, float]:
     wer_by_language: dict[str, float] = {}
     languages = sorted({record.language for record in eval_records})
+    model = trainer.model
+    original_forced_decoder_ids = model.config.forced_decoder_ids
+    original_suppress_tokens = model.config.suppress_tokens
     for language in languages:
         subset = [record for record in eval_records if record.language == language]
         if not subset:
             continue
+        if force_language_prompts:
+            set_forced_language_prompt(model, processor, language)
         eval_ds = records_to_dataset(subset)
         predictions = trainer.predict(eval_ds, metric_key_prefix=f"wer_{language}")
         pred_ids = predictions.predictions
@@ -441,6 +492,8 @@ def evaluate_per_language(
         pred_str = processor.tokenizer.batch_decode(pred_ids, skip_special_tokens=True)
         label_str = processor.tokenizer.batch_decode(label_ids, skip_special_tokens=True)
         wer_by_language[language] = 100 * metric.compute(predictions=pred_str, references=label_str)
+    model.config.forced_decoder_ids = original_forced_decoder_ids
+    model.config.suppress_tokens = original_suppress_tokens
     return wer_by_language
 
 
@@ -497,6 +550,9 @@ def main() -> int:
     if args.dry_run:
         return 0
 
+    global WHISPER_MAX_AUDIO_SECONDS
+    WHISPER_MAX_AUDIO_SECONDS = args.max_train_audio_seconds
+
     if not train_records:
         print("ERROR: no train records found.", file=sys.stderr)
         return 1
@@ -507,6 +563,14 @@ def main() -> int:
     model = WhisperForConditionalGeneration.from_pretrained(args.model_name)
     model.config.forced_decoder_ids = None
     model.config.suppress_tokens = []
+
+    if args.force_language_prompts:
+        print("Language prompts: enabled (per-sample in training, forced per language in eval)")
+    if args.skip_long_audio:
+        print(
+            f"Long train clips: skip when audio > {args.max_train_audio_seconds}s "
+            "(avoids misaligned audio/transcript pairs)"
+        )
 
     if args.gradient_checkpointing:
         model.gradient_checkpointing_enable()
@@ -579,12 +643,19 @@ def main() -> int:
         "max_samples_per_language": args.max_samples_per_language,
         "max_steps": max_steps,
         "num_train_epochs": args.num_train_epochs,
+        "force_language_prompts": args.force_language_prompts,
+        "skip_long_audio": args.skip_long_audio,
+        "max_train_audio_seconds": args.max_train_audio_seconds,
     }
     callbacks: list[TrainerCallback] = []
     if want_wandb:
         callbacks.append(SafeWandbCallback(args, output_dir, run_config))
 
-    collator = DataCollatorSpeechSeq2SeqWithPadding(processor)
+    collator = DataCollatorSpeechSeq2SeqWithPadding(
+        processor,
+        force_language_prompts=args.force_language_prompts,
+        skip_long_audio=args.skip_long_audio,
+    )
     trainer = Seq2SeqTrainer(
         args=training_args,
         model=model,
@@ -601,6 +672,7 @@ def main() -> int:
             processor,
             metric,
             args.per_language_eval_steps,
+            force_language_prompts=args.force_language_prompts,
         )
         per_lang_callback.bind_trainer(trainer)
         trainer.add_callback(per_lang_callback)
@@ -625,10 +697,21 @@ def main() -> int:
             f"Training capped {collator.capped_audio_count} clip(s) "
             f"to first {WHISPER_MAX_AUDIO_SECONDS}s (clips still used)."
         )
+    if collator.skipped_long_audio_count:
+        print(
+            f"Training skipped {collator.skipped_long_audio_count} clip(s) "
+            f"longer than {WHISPER_MAX_AUDIO_SECONDS}s."
+        )
 
     if eval_records:
         if args.report_per_language:
-            per_lang = evaluate_per_language(trainer, eval_records, processor, metric)
+            per_lang = evaluate_per_language(
+                trainer,
+                eval_records,
+                processor,
+                metric,
+                force_language_prompts=args.force_language_prompts,
+            )
             print("Per-language dev WER:")
             for language, wer in per_lang.items():
                 print(f"  {language}: {wer:.2f}%")
@@ -653,7 +736,13 @@ def main() -> int:
             )
             if all_eval_records:
                 print("\n=== All-language dev WER (sequential / forgetting check) ===")
-                chain_wer = evaluate_per_language(trainer, all_eval_records, processor, metric)
+                chain_wer = evaluate_per_language(
+                    trainer,
+                    all_eval_records,
+                    processor,
+                    metric,
+                    force_language_prompts=args.force_language_prompts,
+                )
                 for language, wer in chain_wer.items():
                     print(f"  {language}: {wer:.2f}%")
                 if chain_wer:
