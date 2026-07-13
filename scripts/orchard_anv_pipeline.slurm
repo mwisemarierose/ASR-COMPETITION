@@ -10,6 +10,7 @@
 #
 # Usage:
 #   mkdir -p logs
+#   sbatch scripts/orchard_anv_pipeline.slurm kalenjin test clean
 #   sbatch scripts/orchard_anv_pipeline.slurm kalenjin train unscripted clean
 #   sbatch scripts/orchard_anv_pipeline.slurm kalenjin train unscripted extract
 #   sbatch scripts/orchard_anv_pipeline.slurm dholuo dev scripted
@@ -26,6 +27,12 @@ LANGUAGE="${1:-kalenjin}"
 SPLIT="${2:-}"
 STYLE="${3:-}"
 STEP="${4:-}"
+
+# Allow shorthand:  language split clean|extract  (no style)
+if [[ "$STYLE" == "clean" || "$STYLE" == "extract" ]]; then
+  STEP="$STYLE"
+  STYLE=""
+fi
 
 export ANV_DATASET_ROOT=/project/community/rmwisene/datasets
 export WORK_DIR=/project/community/rmwisene/pipeline_outputs
