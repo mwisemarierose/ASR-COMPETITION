@@ -20,6 +20,7 @@ import argparse
 import json
 import os
 import sys
+import traceback
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -223,6 +224,11 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--dry-run", action="store_true", help="Print dataset stats and exit.")
+    parser.add_argument(
+        "--eval-only",
+        action="store_true",
+        help="Load --model-name checkpoint and run per-language dev WER (no training).",
+    )
     parser.add_argument("--per-device-train-batch-size", type=int, default=8)
     parser.add_argument("--per-device-eval-batch-size", type=int, default=8)
     parser.add_argument("--gradient-accumulation-steps", type=int, default=2)
@@ -351,6 +357,19 @@ def log_to_wandb(metrics: dict[str, float], step: int | None = None) -> None:
         print(f"WARNING: wandb log failed ({exc})", file=sys.stderr)
 
 
+def wer_percent(metric: Any, predictions: list[str], references: list[str]) -> float:
+    """Normalize evaluate/jiwer outputs to a WER percentage."""
+    result = metric.compute(predictions=predictions, references=references)
+    if isinstance(result, dict):
+        score = result.get("wer", result.get("word_error_rate"))
+        if score is None and len(result) == 1:
+            score = next(iter(result.values()))
+        if score is None:
+            raise ValueError(f"Unexpected WER metric result: {result}")
+        return float(score) * 100.0
+    return float(result) * 100.0
+
+
 class PerLanguageEvalCallback(TrainerCallback):
     """Competition-style per-language WER on checkpoint save (unweighted average)."""
 
@@ -360,12 +379,14 @@ class PerLanguageEvalCallback(TrainerCallback):
         processor: WhisperProcessor,
         metric: Any,
         eval_every_steps: int,
+        output_dir: Path,
         force_language_prompts: bool = False,
     ) -> None:
         self.eval_records = eval_records
         self.processor = processor
         self.metric = metric
         self.eval_every_steps = eval_every_steps
+        self.output_dir = output_dir
         self.force_language_prompts = force_language_prompts
         self.trainer: Seq2SeqTrainer | None = None
 
@@ -388,13 +409,19 @@ class PerLanguageEvalCallback(TrainerCallback):
             )
         except Exception as exc:
             print(f"WARNING: per-language eval failed ({exc})", file=sys.stderr)
+            traceback.print_exc(file=sys.stderr)
             return
         for language, wer in per_lang.items():
             print(f"  {language}: {wer:.2f}%", flush=True)
         if not per_lang:
+            print("WARNING: per-language eval returned no languages.", file=sys.stderr)
             return
         avg_wer = float(np.mean(list(per_lang.values())))
         print(f"Unweighted average WER: {avg_wer:.2f}%", flush=True)
+        metrics_path = self.output_dir / f"per_language_wer_step_{state.global_step}.json"
+        metrics_payload = {**per_lang, "average": avg_wer, "step": state.global_step}
+        metrics_path.write_text(json.dumps(metrics_payload, indent=2), encoding="utf-8")
+        print(f"Saved per-language WER to {metrics_path}", flush=True)
         log_to_wandb(
             {
                 **{f"wer/dev/{language}": wer for language, wer in per_lang.items()},
@@ -478,22 +505,29 @@ def evaluate_per_language(
     model = trainer.model
     original_forced_decoder_ids = model.config.forced_decoder_ids
     original_suppress_tokens = model.config.suppress_tokens
-    for language in languages:
-        subset = [record for record in eval_records if record.language == language]
-        if not subset:
-            continue
-        if force_language_prompts:
-            set_forced_language_prompt(model, processor, language)
-        eval_ds = records_to_dataset(subset)
-        predictions = trainer.predict(eval_ds, metric_key_prefix=f"wer_{language}")
-        pred_ids = predictions.predictions
-        label_ids = predictions.label_ids
-        label_ids[label_ids == -100] = processor.tokenizer.pad_token_id
-        pred_str = processor.tokenizer.batch_decode(pred_ids, skip_special_tokens=True)
-        label_str = processor.tokenizer.batch_decode(label_ids, skip_special_tokens=True)
-        wer_by_language[language] = 100 * metric.compute(predictions=pred_str, references=label_str)
-    model.config.forced_decoder_ids = original_forced_decoder_ids
-    model.config.suppress_tokens = original_suppress_tokens
+    # Predict spawns DataLoader workers on top of training; with parquet decode
+    # this can OOM-kill workers on 64G nodes (eval then prints only the header).
+    original_workers = trainer.args.dataloader_num_workers
+    trainer.args.dataloader_num_workers = 0
+    try:
+        for language in languages:
+            subset = [record for record in eval_records if record.language == language]
+            if not subset:
+                continue
+            if force_language_prompts:
+                set_forced_language_prompt(model, processor, language)
+            eval_ds = records_to_dataset(subset)
+            predictions = trainer.predict(eval_ds, metric_key_prefix=f"wer_{language}")
+            pred_ids = predictions.predictions
+            label_ids = predictions.label_ids
+            label_ids[label_ids == -100] = processor.tokenizer.pad_token_id
+            pred_str = processor.tokenizer.batch_decode(pred_ids, skip_special_tokens=True)
+            label_str = processor.tokenizer.batch_decode(label_ids, skip_special_tokens=True)
+            wer_by_language[language] = wer_percent(metric, pred_str, label_str)
+    finally:
+        model.config.forced_decoder_ids = original_forced_decoder_ids
+        model.config.suppress_tokens = original_suppress_tokens
+        trainer.args.dataloader_num_workers = original_workers
     return wer_by_language
 
 
@@ -550,10 +584,14 @@ def main() -> int:
     if args.dry_run:
         return 0
 
+    if args.eval_only and not eval_records_for_training:
+        print("ERROR: no eval records found for --eval-only.", file=sys.stderr)
+        return 1
+
     global WHISPER_MAX_AUDIO_SECONDS
     WHISPER_MAX_AUDIO_SECONDS = args.max_train_audio_seconds
 
-    if not train_records:
+    if not args.eval_only and not train_records:
         print("ERROR: no train records found.", file=sys.stderr)
         return 1
 
@@ -575,7 +613,11 @@ def main() -> int:
     if args.gradient_checkpointing:
         model.gradient_checkpointing_enable()
 
-    train_ds = records_to_dataset(train_records)
+    train_ds = (
+        records_to_dataset(eval_records_for_training[:1])
+        if args.eval_only
+        else records_to_dataset(train_records)
+    )
     use_per_lang_eval = (
         args.per_language_eval_steps > 0
         and bool(eval_records_for_training)
@@ -596,7 +638,7 @@ def main() -> int:
         label_ids[label_ids == -100] = processor.tokenizer.pad_token_id
         pred_str = processor.tokenizer.batch_decode(pred_ids, skip_special_tokens=True)
         label_str = processor.tokenizer.batch_decode(label_ids, skip_special_tokens=True)
-        wer = 100 * metric.compute(predictions=pred_str, references=label_str)
+        wer = wer_percent(metric, pred_str, label_str)
         return {"wer": wer}
 
     use_bf16 = args.bf16 and torch.cuda.is_available() and torch.cuda.is_bf16_supported()
@@ -672,6 +714,7 @@ def main() -> int:
             processor,
             metric,
             args.per_language_eval_steps,
+            output_dir,
             force_language_prompts=args.force_language_prompts,
         )
         per_lang_callback.bind_trainer(trainer)
@@ -681,6 +724,33 @@ def main() -> int:
             f"on {len(eval_records_for_training)} dev clips "
             f"({summarize_records(eval_records_for_training)})"
         )
+
+    if args.eval_only:
+        print(f"=== Eval-only: {args.model_name} ===", flush=True)
+        print(
+            f"Dev clips: {len(eval_records_for_training)} "
+            f"— {summarize_records(eval_records_for_training)}",
+            flush=True,
+        )
+        per_lang = evaluate_per_language(
+            trainer,
+            eval_records_for_training,
+            processor,
+            metric,
+            force_language_prompts=args.force_language_prompts,
+        )
+        for language, wer in per_lang.items():
+            print(f"  {language}: {wer:.2f}%", flush=True)
+        if not per_lang:
+            print("ERROR: eval-only produced no WER results.", file=sys.stderr)
+            return 1
+        avg_wer = float(np.mean(list(per_lang.values())))
+        print(f"Unweighted average WER: {avg_wer:.2f}%", flush=True)
+        metrics_path = output_dir / "per_language_wer_eval_only.json"
+        metrics_payload = {**per_lang, "average": avg_wer, "model": str(args.model_name)}
+        metrics_path.write_text(json.dumps(metrics_payload, indent=2), encoding="utf-8")
+        print(f"Saved WER to {metrics_path}", flush=True)
+        return 0
 
     trainer.train(resume_from_checkpoint=args.resume_from_checkpoint)
 
