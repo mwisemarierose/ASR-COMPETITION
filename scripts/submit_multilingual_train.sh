@@ -27,7 +27,7 @@ JOBID=$(sbatch --parsable \
   --output=logs/whisper-multilingual-%j.out \
   --error=logs/whisper-multilingual-%j.err \
   --time=12:00:00 \
-  --cpus-per-task=32 \
+  --cpus-per-task=64 \
   --mem=64G \
   --gres=gpu:1 \
   scripts/train_multilingual.sh)
