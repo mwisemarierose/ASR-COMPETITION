@@ -62,6 +62,19 @@ class ParquetFilterStats:
         }
 
 
+def _readable_parquet_shards(parquet_paths: list[Path]) -> list[Path]:
+    """Drop incomplete/corrupt Parquet shards (common after partial downloads)."""
+    readable: list[Path] = []
+    for path in parquet_paths:
+        try:
+            pq.read_schema(path)
+        except Exception as exc:
+            print(f"  ! warning: skipping corrupt shard {path.name}: {exc}")
+            continue
+        readable.append(path)
+    return readable
+
+
 def _process_parquet_shard(
     parquet_path: str,
     style: str,
@@ -564,10 +577,17 @@ class CleaningPipeline:
         rows = 0
         missing_audio = 0
 
+        readable_paths = _readable_parquet_shards(context.parquet_paths)
         if not context.parquet_paths:
             issues.append("no_parquet_shards")
+        elif not readable_paths:
+            issues.append("all_parquet_shards_corrupt")
         else:
-            sample_path = context.parquet_paths[0]
+            if len(readable_paths) < len(context.parquet_paths):
+                issues.append(
+                    f"corrupt_shards:{len(context.parquet_paths) - len(readable_paths)}"
+                )
+            sample_path = readable_paths[0]
             schema_names = pq.read_schema(sample_path).names
             if not any(name in schema_names for name in ("audio", "bytes", "audio_bytes")):
                 issues.append("missing_audio_column")
@@ -579,8 +599,12 @@ class CleaningPipeline:
             audio_col = next(
                 name for name in ("audio", "bytes", "audio_bytes") if name in schema_names
             )
-            for parquet_path in context.parquet_paths[:3]:
-                table = pq.read_table(parquet_path, columns=[audio_col])
+            for parquet_path in readable_paths[:3]:
+                try:
+                    table = pq.read_table(parquet_path, columns=[audio_col])
+                except Exception as exc:
+                    print(f"  ! warning: could not sample {parquet_path.name}: {exc}")
+                    continue
                 rows += table.num_rows
                 for row_index in range(min(table.num_rows, 50)):
                     if not audio_bytes_from_struct(table.column(0)[row_index].as_py()):
@@ -602,7 +626,13 @@ class CleaningPipeline:
         out_manifest = self.config.cleaned_manifest_path(context.split, context.style)
         out_manifest.parent.mkdir(parents=True, exist_ok=True)
         meta_table = merge_meta_tables(context.meta_csv, context.transcripts_csv)
-        shard_paths = [str(path) for path in context.parquet_paths]
+        readable_paths = _readable_parquet_shards(context.parquet_paths)
+        shard_paths = [str(path) for path in readable_paths]
+        if context.parquet_paths and not shard_paths:
+            raise RuntimeError(
+                f"All Parquet shards are corrupt for {context.language}/{context.split}/{context.style}. "
+                "Re-download this split or remove bad files under audios/."
+            )
 
         if self.config.workers > 1 and len(shard_paths) > 1:
             rows, stats = self._clean_parquet_parallel(context, shard_paths, meta_table)
