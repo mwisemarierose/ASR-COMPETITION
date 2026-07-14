@@ -58,8 +58,9 @@ if [[ -n "${SLURM_CPUS_PER_TASK:-}" && "${SLURM_CPUS_PER_TASK}" -gt 1 ]]; then
   CMD+=(--workers "$SLURM_CPUS_PER_TASK")
 fi
 
-# reuse extracted tar.xz if already unpacked
-if [[ -d "$WORK_DIR/extracted/$DOMAIN" ]]; then
+# Reuse extracted tar.xz only when THIS domain/split cache is complete.
+EXTRACT_MARKER="$WORK_DIR/extracted/$DOMAIN/${SPLIT:-train}/audio/.extracted.json"
+if [[ -n "$SPLIT" && -f "$EXTRACT_MARKER" ]]; then
   CMD+=(--skip-extract)
 fi
 
