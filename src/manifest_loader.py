@@ -16,24 +16,53 @@ _CSV_ENCODINGS = ("utf-8-sig", "utf-8", "latin-1", "cp1252")
 
 
 def _iter_manifest_objects(manifest_path: Path):
-    """Yield (raw_dict, line_number) from JSONL or JSON-array manifest files."""
-    text = manifest_path.read_text(encoding="utf-8").strip()
-    if not text:
+    """Yield (line_number, raw_dict) from JSONL or JSON-array manifest files."""
+    if not manifest_path.is_file():
         return
 
-    if text.startswith("["):
-        for line_number, raw in enumerate(json.loads(text), start=1):
+    with manifest_path.open(encoding="utf-8-sig") as handle:
+        preview = ""
+        while True:
+            chunk = handle.read(4096)
+            if not chunk:
+                break
+            preview = chunk.lstrip()
+            if preview:
+                break
+
+    if not preview:
+        return
+
+    if preview.startswith("["):
+        text = manifest_path.read_text(encoding="utf-8-sig").strip()
+        try:
+            array = json.loads(text)
+        except json.JSONDecodeError as exc:
+            print(f"  ! warning: skipping corrupt JSON array {manifest_path.name}: {exc.msg}")
+            return
+        if not isinstance(array, list):
+            return
+        for line_number, raw in enumerate(array, start=1):
             if isinstance(raw, dict):
                 yield line_number, raw
         return
 
-    for line_number, line in enumerate(text.splitlines(), start=1):
-        line = line.strip()
-        if not line:
-            continue
-        raw = json.loads(line)
-        if isinstance(raw, dict):
-            yield line_number, raw
+    with manifest_path.open(encoding="utf-8-sig") as handle:
+        for line_number, line in enumerate(handle, start=1):
+            line = line.strip().lstrip("\ufeff")
+            if not line:
+                continue
+            try:
+                raw = json.loads(line)
+            except json.JSONDecodeError as exc:
+                preview = line[:80].replace("\n", "\\n")
+                print(
+                    f"  ! warning: skipping invalid JSON in {manifest_path.name} "
+                    f"line {line_number}: {exc.msg} ({preview!r})"
+                )
+                continue
+            if isinstance(raw, dict):
+                yield line_number, raw
 
 
 class ManifestChunkLoader:
