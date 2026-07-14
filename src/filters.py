@@ -11,7 +11,6 @@ from .media_resolver import MediaResolver
 from .models import AfrivoiceRecord, FilterStats, SplitContext
 from .transcript_cleaner import SwahiliTranscriptCleaner
 from .validators import (
-    AlignmentValidator,
     AudioDurationValidator,
     AudioFileValidator,
     TranscriptValidator,
@@ -37,8 +36,6 @@ class RecordFilter:
                 verify_audio=config.verify_audio,
             )
         )
-        if config.verify_alignment and config.verify_audio:
-            self.validators.append(AlignmentValidator())
         self._seen_keys: set[str] = set()
 
     def process(self, record: AfrivoiceRecord, context: SplitContext) -> tuple[dict[str, Any] | None, str | None]:

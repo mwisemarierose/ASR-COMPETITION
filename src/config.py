@@ -136,7 +136,7 @@ class PipelineConfig:
     dry_run: bool = False
     skip_extract: bool = False
     force_extract: bool = False
-    verify_alignment: bool = True
+    verify_alignment: bool = False
     skip_verify: bool = False
     workers: int = 1
     max_records: int | None = None
