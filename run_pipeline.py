@@ -6,7 +6,7 @@ Afrivoice: clean -> preprocess -> extract
 Anv-ke:    clean -> extract (Parquet streaming, no WAV cache)
 """
 from __future__ import annotations
-
+import os
 import argparse
 import sys
 from pathlib import Path
@@ -61,7 +61,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--force-extract", action="store_true")
     parser.add_argument("--skip-alignment-check", action="store_true")
     parser.add_argument("--skip-verify", action="store_true")
-    parser.add_argument("--workers", type=int, default=1)
+    parser.add_argument("--workers", type=int, default=os.cpu_count())
     parser.add_argument("--max-records", type=int)
     return parser
 
