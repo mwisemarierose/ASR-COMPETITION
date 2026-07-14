@@ -5,8 +5,11 @@ from __future__ import annotations
 
 import json
 import tarfile
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
+
+from tqdm import tqdm
 
 from .config import PipelineConfig
 from .models import SplitContext
@@ -79,11 +82,24 @@ class TarXzArchiveExtractor:
 
         target_dir.mkdir(parents=True, exist_ok=True)
         extracted_files = 0
+        total_archives = len(archives)
 
-        for archive in archives:
+        for index, archive in enumerate(
+            tqdm(archives, desc="  extract archives", unit="archive"),
+            start=1,
+        ):
+            archive_files = 0
+            started = time.monotonic()
+            tqdm.write(f"    [{index}/{total_archives}] {archive.name} ...")
             with tarfile.open(archive, mode="r:xz") as handle:
+                archive_files = sum(1 for member in handle.getmembers() if member.isfile())
                 handle.extractall(path=target_dir)
-                extracted_files += sum(1 for member in handle.getmembers() if member.isfile())
+            extracted_files += archive_files
+            elapsed = time.monotonic() - started
+            tqdm.write(
+                f"    done {archive.name}: {archive_files} files in {elapsed:.0f}s "
+                f"(running total {extracted_files})"
+            )
 
         marker.write_text(
             json.dumps(
