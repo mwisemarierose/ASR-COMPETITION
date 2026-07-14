@@ -7,8 +7,8 @@
 #
 # Balance modes (BALANCE env var):
 #   cap    — cap each language (default 80k; good compromise)
-#   equal  — same count per language (uses only 28k each)
-#   none   — use all 970k clips (Swahili dominates ~54%)
+#   equal  — same count per language (uses smallest language count)
+#   none   — use all clips (Swahili dominates ~53%)
 #
 # Resume epoch 1 (same OUTPUT_DIR, same data):
 #   OUTPUT_DIR=.../multilingual_job_125891 RESUME=1 ./scripts/submit_multilingual_train.sh
@@ -111,8 +111,14 @@ echo "Learning rate: $LEARNING_RATE"
 echo "Train batch / grad accum: $TRAIN_BATCH_SIZE / $GRAD_ACCUM (effective $((TRAIN_BATCH_SIZE * GRAD_ACCUM)))"
 echo "DataLoader workers: $DATALOADER_WORKERS"
 echo "Output: $OUTPUT_DIR"
+echo "Checkpoints: every ${SAVE_STEPS:-500} steps (keep all; set SAVE_TOTAL_LIMIT=N to prune old ones)"
 if [[ -n "${SLURM_JOB_ID:-}" ]]; then
   echo "SLURM job: $SLURM_JOB_ID"
+fi
+
+SAVE_TOTAL_LIMIT_ARGS=()
+if [[ -n "${SAVE_TOTAL_LIMIT:-}" ]]; then
+  SAVE_TOTAL_LIMIT_ARGS=(--save-total-limit "$SAVE_TOTAL_LIMIT")
 fi
 
 echo "=== GPU check ==="
@@ -153,7 +159,7 @@ python scripts/finetune_whisper.py \
   --per-language-eval-steps "$PER_LANG_EVAL_STEPS" \
   --max-eval-samples 2400 \
   --logging-steps 50 \
-  --save-total-limit 3 \
+  "${SAVE_TOTAL_LIMIT_ARGS[@]}" \
   --dataloader-num-workers "$DATALOADER_WORKERS" \
   --report-to wandb tensorboard \
   --wandb-project "$WANDB_PROJECT" \

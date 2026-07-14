@@ -294,7 +294,6 @@ def collect_test_records(args: argparse.Namespace) -> list[TrainingRecord]:
         anv_languages=tuple(COMPETITION_ANV_LANGUAGES),
         include_swahili=True,
         include_anv=True,
-        skip_maasai_scripted_train=False,
         require_transcript=False,
         max_samples=args.max_samples,
     )

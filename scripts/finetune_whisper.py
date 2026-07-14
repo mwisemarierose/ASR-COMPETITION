@@ -51,6 +51,7 @@ from src.whisper_dataset import (  # noqa: E402
     TrainingRecord,
     audio_skip_count,
     balance_records_by_language,
+    format_record_portions,
     collect_records,
     format_duration_summary,
     subsample_eval_records,
@@ -195,11 +196,6 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--no-swahili", action="store_true", help="Train on Anv languages only.")
     parser.add_argument("--no-anv", action="store_true", help="Train on Swahili only.")
-    parser.add_argument(
-        "--include-maasai-scripted-train",
-        action="store_true",
-        help="Include maasai/train/scripted (partial extract; off by default).",
-    )
     parser.add_argument("--train-split", default="train")
     parser.add_argument("--eval-split", default="dev")
     parser.add_argument("--max-samples", type=int, default=None, help="Cap total train samples.")
@@ -253,7 +249,12 @@ def parse_args() -> argparse.Namespace:
         "Set 0 to disable during training.",
     )
     parser.add_argument("--logging-steps", type=int, default=25)
-    parser.add_argument("--save-total-limit", type=int, default=3)
+    parser.add_argument(
+        "--save-total-limit",
+        type=int,
+        default=None,
+        help="Max checkpoints to keep on disk (default: keep all).",
+    )
     parser.add_argument("--dataloader-num-workers", type=int, default=4)
     parser.add_argument("--bf16", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--gradient-checkpointing", action="store_true")
@@ -543,7 +544,6 @@ def main() -> int:
         "anv_languages": tuple(args.anv_languages),
         "include_swahili": not args.no_swahili,
         "include_anv": not args.no_anv,
-        "skip_maasai_scripted_train": not args.include_maasai_scripted_train,
         "seed": args.seed,
     }
 
@@ -569,14 +569,25 @@ def main() -> int:
         seed=args.seed,
     )
 
+    train_counts = summarize_records(train_records)
+    eval_counts = summarize_records(eval_records)
+
     print(f"Work dir: {work_dir}")
-    print(f"Train samples: {len(train_records)} — {summarize_records(train_records)}")
-    print(f"Eval samples:  {len(eval_records)} — {summarize_records(eval_records)}")
+    print(f"Train samples: {len(train_records):,}")
+    print("Train by language:")
+    print(format_record_portions(train_counts))
+
+    print(f"Eval samples: {len(eval_records):,}")
+    print("Eval by language:")
+    print(format_record_portions(eval_counts))
     if args.max_eval_samples and len(eval_records_for_training) < len(eval_records):
+        eval_train_counts = summarize_records(eval_records_for_training)
         print(
-            f"Training-time eval samples: {len(eval_records_for_training)} "
-            f"(capped from {len(eval_records)}) — {summarize_records(eval_records_for_training)}"
+            f"Training-time eval samples: {len(eval_records_for_training):,} "
+            f"(capped from {len(eval_records):,})"
         )
+        print("Training-time eval by language:")
+        print(format_record_portions(eval_train_counts))
     train_duration = summarize_record_durations(train_records)
     print("Train audio duration (from manifest metadata):")
     print(format_duration_summary(train_duration))
@@ -801,7 +812,6 @@ def main() -> int:
                 anv_languages=tuple(COMPETITION_ANV_LANGUAGES),
                 include_swahili=True,
                 include_anv=True,
-                skip_maasai_scripted_train=not args.include_maasai_scripted_train,
                 seed=args.seed,
             )
             if all_eval_records:

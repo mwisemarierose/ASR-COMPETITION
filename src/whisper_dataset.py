@@ -140,13 +140,10 @@ def iter_anv_records(
     split: str,
     languages: tuple[str, ...] = COMPETITION_ANV_LANGUAGES,
     *,
-    skip_maasai_scripted_train: bool = True,
     require_transcript: bool = True,
 ) -> Iterator[TrainingRecord]:
     for language in languages:
         for style in ANV_STYLES:
-            if skip_maasai_scripted_train and language == "maasai" and split == "train" and style == "scripted":
-                continue
             manifest_path = _anv_manifest_path(work_dir, language, split, style)
             if not manifest_path.is_file():
                 continue
@@ -406,7 +403,6 @@ def collect_records(
     anv_languages: tuple[str, ...] = COMPETITION_ANV_LANGUAGES,
     include_swahili: bool = True,
     include_anv: bool = True,
-    skip_maasai_scripted_train: bool = True,
     require_transcript: bool = True,
     max_samples: int | None = None,
     max_samples_per_source: int | None = None,
@@ -431,7 +427,6 @@ def collect_records(
                 work_dir,
                 anv_split_name,
                 languages=anv_languages,
-                skip_maasai_scripted_train=skip_maasai_scripted_train,
                 require_transcript=require_transcript,
             )
         )
@@ -636,6 +631,17 @@ def summarize_records(records: list[TrainingRecord]) -> dict[str, int]:
     for record in records:
         counts[record.language] = counts.get(record.language, 0) + 1
     return dict(sorted(counts.items()))
+
+
+def format_record_portions(counts: dict[str, int]) -> str:
+    total = sum(counts.values())
+    if total == 0:
+        return "  (empty)"
+    lines = []
+    for key, count in sorted(counts.items()):
+        pct = 100.0 * count / total
+        lines.append(f"  {key}: {count:,} ({pct:.1f}%)")
+    return "\n".join(lines)
 
 
 def whisper_language_code(language: str) -> str | None:
