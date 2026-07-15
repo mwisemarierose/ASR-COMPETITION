@@ -163,24 +163,12 @@ def _decode_audio_bytes_with_ffmpeg(
     return audio
 
 
-def _decode_audio_bytes(audio_bytes: bytes, sample_rate: int = SAMPLE_RATE) -> np.ndarray:
-    """Decode embedded audio bytes; try soundfile, librosa, PyAV, then ffmpeg."""
-    if not audio_bytes:
-        raise RuntimeError("Empty audio bytes")
-
+def _decode_audio_bytes_inprocess(
+    audio_bytes: bytes,
+    sample_rate: int = SAMPLE_RATE,
+) -> np.ndarray:
+    """In-process decode via librosa/PyAV. Can segfault on corrupt bytes — avoid in training."""
     errors: list[str] = []
-
-    if audio_bytes[:4] in (b"RIFF", b"fLaC", b"OggS") or audio_bytes[:3] == b"ID3":
-        try:
-            audio, file_sr = sf.read(io.BytesIO(audio_bytes), dtype="float32", always_2d=False)
-            if audio.ndim > 1:
-                audio = audio.mean(axis=1)
-            audio = np.asarray(audio, dtype=np.float32)
-            if file_sr != sample_rate:
-                audio = librosa.resample(audio, orig_sr=file_sr, target_sr=sample_rate)
-            return audio
-        except Exception as exc:
-            errors.append(f"soundfile: {exc}")
 
     try:
         audio, _file_sr = librosa.load(io.BytesIO(audio_bytes), sr=sample_rate, mono=True)
@@ -208,10 +196,46 @@ def _decode_audio_bytes(audio_bytes: bytes, sample_rate: int = SAMPLE_RATE) -> n
     except Exception as exc:
         errors.append(f"pyav: {exc}")
 
+    raise RuntimeError("Cannot decode parquet audio bytes (" + "; ".join(errors) + ")")
+
+
+def _decode_audio_bytes(audio_bytes: bytes, sample_rate: int = SAMPLE_RATE) -> np.ndarray:
+    """Decode embedded Parquet audio bytes.
+
+    Prefer ffmpeg subprocess for non-WAV payloads: corrupt bytes can segfault
+    in-process librosa/PyAV, but ffmpeg runs in a child process and fails safely.
+    """
+    if not audio_bytes:
+        raise RuntimeError("Empty audio bytes")
+
+    errors: list[str] = []
+
+    if audio_bytes[:4] in (b"RIFF", b"fLaC", b"OggS") or audio_bytes[:3] == b"ID3":
+        try:
+            audio, file_sr = sf.read(io.BytesIO(audio_bytes), dtype="float32", always_2d=False)
+            if audio.ndim > 1:
+                audio = audio.mean(axis=1)
+            audio = np.asarray(audio, dtype=np.float32)
+            if file_sr != sample_rate:
+                audio = librosa.resample(audio, orig_sr=file_sr, target_sr=sample_rate)
+            return audio
+        except Exception as exc:
+            errors.append(f"soundfile: {exc}")
+
+    ffmpeg = configure_ffmpeg()
+    if ffmpeg:
+        try:
+            return _decode_audio_bytes_with_ffmpeg(audio_bytes, sample_rate=sample_rate)
+        except Exception as exc:
+            errors.append(f"ffmpeg: {exc}")
+            # ffmpeg is available but rejected the payload — treat as corrupt, don't
+            # fall through to librosa/PyAV (those can SIGSEGV on the same bytes).
+            raise RuntimeError("Cannot decode parquet audio bytes (" + "; ".join(errors) + ")")
+
     try:
-        return _decode_audio_bytes_with_ffmpeg(audio_bytes, sample_rate=sample_rate)
+        return _decode_audio_bytes_inprocess(audio_bytes, sample_rate=sample_rate)
     except Exception as exc:
-        errors.append(f"ffmpeg: {exc}")
+        errors.append(str(exc))
 
     raise RuntimeError("Cannot decode parquet audio bytes (" + "; ".join(errors) + ")")
 
