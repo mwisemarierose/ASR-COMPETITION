@@ -11,11 +11,12 @@
 #   ./scripts/submit_multilingual_epoch2.sh
 #
 # Resume (must reuse the original job's output dir):
-#   OUTPUT_DIR=/project/.../multilingual_job_125891 RESUME=1 ./scripts/submit_multilingual_train.sh
+#   OUTPUT_DIR=/project/.../multilingual_job_126124 RESUME=1 DATALOADER_WORKERS=0 ./scripts/submit_multilingual_train.sh
 set -euo pipefail
 
 export PHASE=epoch1
 export EPOCHS="${EPOCHS:-1}"
+SLURM_TIME="${SLURM_TIME:-12:00:00}"
 
 cd ~/ASR-COMPETITION
 mkdir -p logs
@@ -26,7 +27,7 @@ JOBID=$(sbatch --parsable \
   --job-name=whisper-multilingual \
   --output=logs/whisper-multilingual-%j.out \
   --error=logs/whisper-multilingual-%j.err \
-  --time=12:00:00 \
+  --time="$SLURM_TIME" \
   --cpus-per-task=64 \
   --mem=64G \
   --gres=gpu:1 \

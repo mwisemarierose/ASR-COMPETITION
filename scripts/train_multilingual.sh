@@ -54,7 +54,7 @@ case "$PHASE" in
     GRAD_ACCUM="${GRAD_ACCUM:-4}"
     SAVE_STEPS="${SAVE_STEPS:-500}"
     PER_LANG_EVAL_STEPS="${PER_LANG_EVAL_STEPS:-500}"
-    DATALOADER_WORKERS="${DATALOADER_WORKERS:-8}"
+    DATALOADER_WORKERS="${DATALOADER_WORKERS:-4}"
     LANG_PROMPT_ARGS=()
     ALIGN_ARGS=()
     ;;
@@ -135,10 +135,13 @@ RESUME_ARGS=()
 if [[ "$PHASE" == "epoch1" ]]; then
   if [[ "${RESUME:-0}" == "1" ]]; then
     RESUME_ARGS=(--resume-from-checkpoint)
-    echo "=== Resuming from latest checkpoint in $OUTPUT_DIR ==="
+    # Forked workers + parquet/ffmpeg decode can segfault after long runs; load in main process.
+    DATALOADER_WORKERS="${DATALOADER_WORKERS:-0}"
+    echo "=== Resuming from latest checkpoint in $OUTPUT_DIR (dataloader workers=$DATALOADER_WORKERS) ==="
   elif compgen -G "$OUTPUT_DIR/checkpoint-*" > /dev/null; then
     RESUME_ARGS=(--resume-from-checkpoint)
-    echo "=== Auto-resuming from latest checkpoint in $OUTPUT_DIR (SLURM requeue) ==="
+    DATALOADER_WORKERS="${DATALOADER_WORKERS:-0}"
+    echo "=== Auto-resuming from latest checkpoint in $OUTPUT_DIR (SLURM requeue, dataloader workers=$DATALOADER_WORKERS) ==="
   fi
 else
   echo "=== Epoch 2: loading weights from $MODEL_NAME (fresh optimizer, no RESUME) ==="
