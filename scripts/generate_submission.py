@@ -18,8 +18,9 @@ import argparse
 import os
 import sys
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import nullcontext
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 import torch
 from tqdm import tqdm
@@ -168,6 +169,7 @@ def load_batch_audio(
     batch_records: list[TrainingRecord],
     max_audio_seconds: float,
     audio_workers: int,
+    audio_executor: ThreadPoolExecutor | None = None,
 ) -> list[tuple[TrainingRecord, dict[str, Any] | None]]:
     if audio_workers <= 1 or len(batch_records) <= 1:
         return [
@@ -175,15 +177,16 @@ def load_batch_audio(
             for record in batch_records
         ]
 
-    with ThreadPoolExecutor(max_workers=min(audio_workers, len(batch_records))) as pool:
-        audios = pool.map(
-            lambda record: load_audio_for_record(record, max_audio_seconds),
-            batch_records,
-        )
+    loader = lambda record: load_audio_for_record(record, max_audio_seconds)
+    if audio_executor is not None:
+        audios = audio_executor.map(loader, batch_records)
+    else:
+        with ThreadPoolExecutor(max_workers=min(audio_workers, len(batch_records))) as pool:
+            audios = pool.map(loader, batch_records)
     return list(zip(batch_records, audios))
 
 
-def transcribe_language_batch(
+def iter_transcription_batches(
     model: WhisperForConditionalGeneration,
     processor: WhisperProcessor,
     records: list[TrainingRecord],
@@ -191,63 +194,117 @@ def transcribe_language_batch(
     batch_size: int,
     max_audio_seconds: float,
     audio_workers: int,
+    audio_executor: ThreadPoolExecutor | None,
     device: torch.device,
     autocast_dtype: torch.dtype | None,
-) -> list[tuple[str, str, str]]:
-    outputs: list[tuple[str, str, str]] = []
+) -> Iterator[list[tuple[str, str, str]]]:
+    """Yield submission rows batch-by-batch so callers can flush to disk immediately."""
     skipped_audio = 0
     language_code = submission_language_code(records[0].language) if records else "swa"
 
     for start in tqdm(range(0, len(records), batch_size), desc="  batches", leave=False):
         batch_records = records[start : start + batch_size]
+        batch_rows: list[tuple[str, str, str]] = []
         pending: list[tuple[TrainingRecord, dict[str, Any]]] = []
 
-        for record, audio in load_batch_audio(batch_records, max_audio_seconds, audio_workers):
+        for record, audio in load_batch_audio(
+            batch_records,
+            max_audio_seconds,
+            audio_workers,
+            audio_executor=audio_executor,
+        ):
             if audio is None:
                 skipped_audio += 1
-                outputs.append((record.key, language_code, FAILED_AUDIO_PLACEHOLDER))
+                batch_rows.append((record.key, language_code, FAILED_AUDIO_PLACEHOLDER))
                 continue
             pending.append((record, audio))
 
-        if not pending:
-            continue
+        if pending:
+            input_features = [
+                {
+                    "input_features": processor.feature_extractor(
+                        audio["array"],
+                        sampling_rate=audio["sampling_rate"],
+                    ).input_features[0]
+                }
+                for _, audio in pending
+            ]
+            batch = processor.feature_extractor.pad(input_features, return_tensors="pt")
+            batch = {key: value.to(device) for key, value in batch.items()}
+            del input_features
 
-        input_features = [
-            {
-                "input_features": processor.feature_extractor(
-                    audio["array"],
-                    sampling_rate=audio["sampling_rate"],
-                ).input_features[0]
-            }
-            for _, audio in pending
-        ]
-        batch = processor.feature_extractor.pad(input_features, return_tensors="pt")
-        batch = {key: value.to(device) for key, value in batch.items()}
-
-        with torch.inference_mode():
-            if autocast_dtype is not None:
-                with torch.autocast(device_type=device.type, dtype=autocast_dtype):
+            with torch.inference_mode():
+                if autocast_dtype is not None:
+                    with torch.autocast(device_type=device.type, dtype=autocast_dtype):
+                        generated = model.generate(
+                            batch["input_features"],
+                            max_length=GENERATION_MAX_LENGTH,
+                        )
+                else:
                     generated = model.generate(
                         batch["input_features"],
                         max_length=GENERATION_MAX_LENGTH,
                     )
-            else:
-                generated = model.generate(
-                    batch["input_features"],
-                    max_length=GENERATION_MAX_LENGTH,
-                )
 
-        texts = processor.batch_decode(
-            generated,
-            skip_special_tokens=True,
-            clean_up_tokenization_spaces=False,
-        )
-        for (record, _), text in zip(pending, texts):
-            outputs.append((record.key, language_code, text.strip()))
+            texts = processor.batch_decode(
+                generated,
+                skip_special_tokens=True,
+                clean_up_tokenization_spaces=False,
+            )
+            del batch, generated
+            for (record, _), text in zip(pending, texts):
+                batch_rows.append((record.key, language_code, text.strip()))
+            del pending
+
+        if batch_rows:
+            yield batch_rows
+            del batch_rows
 
     if skipped_audio:
         print(f"  skipped {skipped_audio} clip(s) with unreadable audio", flush=True)
-    return outputs
+
+
+def append_submission_rows(
+    rows: list[tuple[str, str, str]],
+    output_path: Path,
+    *,
+    id_column: str,
+    language_column: str,
+    text_column: str,
+    write_header: bool,
+) -> None:
+    """Append one inference batch to a partial CSV (streaming submission generation)."""
+    import csv
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    mode = "w" if write_header else "a"
+    with output_path.open(mode, encoding="utf-8", newline="") as handle:
+        writer = csv.writer(handle, lineterminator="\n")
+        if write_header:
+            writer.writerow([id_column, language_column, text_column])
+        writer.writerows(rows)
+
+
+def load_submission_predictions(
+    path: Path,
+    *,
+    id_column: str,
+    language_column: str,
+    text_column: str,
+) -> dict[str, tuple[str, str]]:
+    """Load partial/final CSV into id -> (language, transcription)."""
+    import csv
+
+    by_id: dict[str, tuple[str, str]] = {}
+    with path.open(encoding="utf-8", newline="") as handle:
+        reader = csv.DictReader(handle)
+        for row in reader:
+            clip_id = str(row[id_column]).strip()
+            by_id[clip_id] = (
+                str(row[language_column]).strip(),
+                str(row[text_column]),
+            )
+    return by_id
 
 
 def write_submission(
@@ -299,16 +356,17 @@ def collect_test_records(args: argparse.Namespace) -> list[TrainingRecord]:
     )
 
 
-def order_submission_rows(
-    rows: list[tuple[str, str, str]],
+def order_submission_predictions(
+    by_id: dict[str, tuple[str, str]],
     *,
     template: list[tuple[str, str]] | None,
 ) -> list[tuple[str, str, str]]:
     if not template:
-        rows.sort(key=lambda item: item[0])
-        return rows
+        return [
+            (clip_id, language, transcription)
+            for clip_id, (language, transcription) in sorted(by_id.items(), key=lambda item: item[0])
+        ]
 
-    by_id = {clip_id: (language, transcription) for clip_id, language, transcription in rows}
     ordered: list[tuple[str, str, str]] = []
     missing_ids: list[str] = []
     for clip_id, language in template:
@@ -317,7 +375,7 @@ def order_submission_rows(
             missing_ids.append(clip_id)
             ordered.append((clip_id, language, FAILED_AUDIO_PLACEHOLDER))
             continue
-        predicted_language, transcription = prediction
+        _predicted_language, transcription = prediction
         ordered.append((clip_id, language, transcription))
 
     if missing_ids:
@@ -335,6 +393,19 @@ def order_submission_rows(
             for clip_id, (language, transcription) in sorted(by_id.items(), key=lambda item: item[0])
         )
     return ordered
+
+
+def order_submission_rows(
+    rows: list[tuple[str, str, str]],
+    *,
+    template: list[tuple[str, str]] | None,
+) -> list[tuple[str, str, str]]:
+    by_id = {clip_id: (language, transcription) for clip_id, language, transcription in rows}
+    return order_submission_predictions(by_id, template=template)
+
+
+def _partial_submission_path(output_path: Path) -> Path:
+    return output_path.with_name(f"{output_path.stem}.partial.csv")
 
 
 def main() -> int:
@@ -395,27 +466,55 @@ def main() -> int:
     model.to(device)
     model.eval()
 
-    submission_rows: list[tuple[str, str, str]] = []
+    partial_path = _partial_submission_path(output_path)
+    if partial_path.exists():
+        partial_path.unlink()
+
+    row_count = 0
+    write_header = True
     languages = sorted({record.language for record in test_records})
-    for language in languages:
-        subset = [record for record in test_records if record.language == language]
-        print(f"Transcribing {language}: {len(subset)} clip(s)", flush=True)
-        if args.force_language_prompts:
-            set_forced_language_prompt(model, processor, language)
-        else:
-            model.config.forced_decoder_ids = None
-            model.config.suppress_tokens = []
-        lang_rows = transcribe_language_batch(
-            model,
-            processor,
-            subset,
-            batch_size=args.batch_size,
-            max_audio_seconds=args.max_audio_seconds,
-            audio_workers=args.audio_workers,
-            device=device,
-            autocast_dtype=autocast_dtype,
-        )
-        submission_rows.extend(lang_rows)
+    transcribe_kwargs = dict(
+        batch_size=args.batch_size,
+        max_audio_seconds=args.max_audio_seconds,
+        audio_workers=args.audio_workers,
+        device=device,
+        autocast_dtype=autocast_dtype,
+    )
+    column_kwargs = dict(
+        id_column=args.id_column,
+        language_column=args.language_column,
+        text_column=args.text_column,
+    )
+    executor_ctx = (
+        ThreadPoolExecutor(max_workers=args.audio_workers)
+        if args.audio_workers > 1
+        else nullcontext()
+    )
+    print(f"Streaming partial rows to {partial_path}", flush=True)
+    with executor_ctx as audio_executor:
+        for language in languages:
+            subset = [record for record in test_records if record.language == language]
+            print(f"Transcribing {language}: {len(subset)} clip(s)", flush=True)
+            if args.force_language_prompts:
+                set_forced_language_prompt(model, processor, language)
+            else:
+                model.config.forced_decoder_ids = None
+                model.config.suppress_tokens = []
+            for batch_rows in iter_transcription_batches(
+                model,
+                processor,
+                subset,
+                audio_executor=audio_executor if args.audio_workers > 1 else None,
+                **transcribe_kwargs,
+            ):
+                append_submission_rows(
+                    batch_rows,
+                    partial_path,
+                    write_header=write_header,
+                    **column_kwargs,
+                )
+                write_header = False
+                row_count += len(batch_rows)
 
     template = None
     if args.test_source == "kaggle_nt":
@@ -423,14 +522,16 @@ def main() -> int:
         if template:
             print(f"Ordering rows to match sample_submission ({len(template)} IDs)")
 
-    submission_rows = order_submission_rows(submission_rows, template=template)
+    print(f"Finalizing submission from {row_count} streamed row(s)", flush=True)
+    by_id = load_submission_predictions(partial_path, **column_kwargs)
+    submission_rows = order_submission_predictions(by_id, template=template)
+    del by_id
     write_submission(
         submission_rows,
         output_path,
-        id_column=args.id_column,
-        language_column=args.language_column,
-        text_column=args.text_column,
+        **column_kwargs,
     )
+    partial_path.unlink(missing_ok=True)
 
     print(f"Wrote {len(submission_rows)} rows to {output_path}")
     if args.expected_rows and len(submission_rows) != args.expected_rows:
