@@ -7,14 +7,14 @@
 #   EPOCHS=1 ./scripts/submit_multilingual_train.sh           # one epoch (default)
 #   EPOCHS=3 ./scripts/submit_multilingual_train.sh           # three epochs
 #
-# Epoch 2 (separate script — loads a checkpoint, language prompts):
+# Epoch 2 (separate script — loads a checkpoint):
 #   ./scripts/submit_multilingual_epoch2.sh
 #
 # Resume (must reuse the original job's output dir):
 #   OUTPUT_DIR=/project/.../multilingual_job_126124 RESUME=1 DATALOADER_WORKERS=0 ./scripts/submit_multilingual_train.sh
 set -euo pipefail
 
-export PHASE=epoch1
+export PHASE="${PHASE:-epoch1}"
 export EPOCHS="${EPOCHS:-1}"
 SLURM_PARTITION="${SLURM_PARTITION:-general}"
 SLURM_TIME="${SLURM_TIME:-12:00:00}"
@@ -36,7 +36,12 @@ JOBID=$(sbatch --parsable \
   scripts/train_multilingual.sh)
 
 echo "Submitted multilingual training (one model, all 6 languages)"
-echo "Phase:   ${PHASE} (whisper-small from scratch)"
+if [[ "$PHASE" == "epoch2" ]]; then
+  echo "Phase:   epoch2 (load weights from INIT_FROM, fresh optimizer)"
+  echo "Init:    ${INIT_FROM:-<unset>}"
+else
+  echo "Phase:   epoch1 (whisper-small from scratch)"
+fi
 echo "Job ID:  $JOBID"
 echo "Partition: $SLURM_PARTITION (time=$SLURM_TIME)"
 echo "Balance: ${BALANCE:-cap} (MAX_PER_LANGUAGE=${MAX_PER_LANGUAGE:-80000})"
