@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import json
 import random
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -179,12 +179,31 @@ def _resolve_kaggle_style_dir(lang_dir: Path, style_name: str) -> Path | None:
     return None
 
 
-def iter_kaggle_nt_test_records(test_root: Path) -> Iterator[TrainingRecord]:
-    """
-    Iterate competition test clips from the Kaggle anv-test-data-nt layout.
+def _kaggle_nt_submission_key(
+    table,
+    schema_names: list[str],
+    *,
+    parquet_path: Path,
+    row_index: int,
+) -> str:
+    """Return the Parquet ``id`` value required for Kaggle submission."""
+    if "id" not in schema_names:
+        raise RuntimeError(f"Kaggle test Parquet missing required 'id' column: {parquet_path}")
 
-    Layout: {kik|kln|luo|mas|som|swa}/{Scripted|Unscripted}/*.parquet
-    Swahili test is Parquet here (not Afrivoice tar.xz used for training).
+    value = table.column("id")[row_index].as_py()
+    if value is not None:
+        clip_id = str(value).strip()
+        if clip_id:
+            return clip_id
+
+    raise RuntimeError(f"Empty id at {parquet_path}:{row_index}")
+
+
+def _iter_kaggle_nt_submission_rows(
+    test_root: Path,
+) -> Iterator[tuple[str, str, dict[str, Any], str]]:
+    """
+    Yield (language, submission_id, audio_source, source_tag) for each Kaggle test clip.
     """
     import pyarrow.parquet as pq
 
@@ -204,55 +223,79 @@ def iter_kaggle_nt_test_records(test_root: Path) -> Iterator[TrainingRecord]:
                     continue
 
                 id_col = resolve_parquet_id_column(schema_names)
-                id_columns: list[str] = []
-                if id_col:
-                    id_columns.append(id_col)
-                for extra_id_col in ("mediaPathId", "media_path_id"):
-                    if extra_id_col in schema_names and extra_id_col not in id_columns:
-                        id_columns.append(extra_id_col)
+                read_columns = ["id"]
+                if id_col and id_col not in read_columns:
+                    read_columns.append(id_col)
 
-                if id_columns:
-                    table = pq.read_table(parquet_path, columns=id_columns)
-                    num_rows = table.num_rows
-                else:
-                    table = None
-                    num_rows = pq.read_metadata(parquet_path).num_rows
-
+                table = pq.read_table(parquet_path, columns=read_columns)
                 parquet_path_str = str(parquet_path.resolve())
-                for row_index in range(num_rows):
-                    recorder_id = None
-                    media_path_id = None
-                    if table is not None:
-                        if id_col:
-                            value = table.column(id_col)[row_index].as_py()
-                            if value is not None:
-                                recorder_id = str(value).strip()
-                        if "mediaPathId" in schema_names:
-                            value = table.column("mediaPathId")[row_index].as_py()
-                            if value is not None:
-                                media_path_id = str(value).strip()
-                        elif "media_path_id" in schema_names:
-                            value = table.column("media_path_id")[row_index].as_py()
-                            if value is not None:
-                                media_path_id = str(value).strip()
+                for row_index in range(table.num_rows):
+                    submission_id = _kaggle_nt_submission_key(
+                        table,
+                        schema_names,
+                        parquet_path=parquet_path,
+                        row_index=row_index,
+                    )
+                    audio_source = {
+                        "type": "parquet",
+                        "path": parquet_path_str,
+                        "row": row_index,
+                    }
+                    source = f"kaggle_nt/{dir_name}/{style_tag}/{parquet_path.name}"
+                    yield language, submission_id, audio_source, source
 
-                    key = make_parquet_record_key(
-                        recorder_id,
-                        parquet_path,
-                        row_index,
-                        media_path_id,
-                    )
-                    yield TrainingRecord(
-                        key=key,
-                        sentence="",
-                        language=language,
-                        audio_source={
-                            "type": "parquet",
-                            "path": parquet_path_str,
-                            "row": row_index,
-                        },
-                        source=f"kaggle_nt/{dir_name}/{style_tag}/{parquet_path.name}",
-                    )
+
+def build_kaggle_nt_submission_id_lookup(
+    test_root: Path,
+) -> dict[tuple[str, int], str]:
+    """Map (parquet_path, row_index) -> Kaggle submission ``id``."""
+    lookup: dict[tuple[str, int], str] = {}
+    for _language, submission_id, audio_source, _source in _iter_kaggle_nt_submission_rows(test_root):
+        key = (audio_source["path"], int(audio_source["row"]))
+        lookup[key] = submission_id
+    return lookup
+
+
+def apply_kaggle_nt_submission_ids(
+    records: list[TrainingRecord],
+    test_root: Path,
+) -> list[TrainingRecord]:
+    """Ensure each test record uses the Parquet ``id`` column for CSV output."""
+    lookup = build_kaggle_nt_submission_id_lookup(test_root)
+    fixed: list[TrainingRecord] = []
+    for record in records:
+        source = record.audio_source or {}
+        if source.get("type") != "parquet":
+            fixed.append(record)
+            continue
+        lookup_key = (str(source["path"]), int(source["row"]))
+        submission_id = lookup.get(lookup_key)
+        if submission_id is None:
+            raise RuntimeError(
+                f"No Kaggle submission id for {source['path']}:{source['row']}",
+            )
+        if submission_id != record.key:
+            fixed.append(replace(record, key=submission_id))
+        else:
+            fixed.append(record)
+    return fixed
+
+
+def iter_kaggle_nt_test_records(test_root: Path) -> Iterator[TrainingRecord]:
+    """
+    Iterate competition test clips from the Kaggle anv-test-data-nt layout.
+
+    Layout: {kik|kln|luo|mas|som|swa}/{Scripted|Unscripted}/*.parquet
+    Swahili test is Parquet here (not Afrivoice tar.xz used for training).
+    """
+    for language, submission_id, audio_source, source in _iter_kaggle_nt_submission_rows(test_root):
+        yield TrainingRecord(
+            key=submission_id,
+            sentence="",
+            language=language,
+            audio_source=audio_source,
+            source=source,
+        )
 
 
 def collect_kaggle_nt_test_records(

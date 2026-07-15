@@ -2,7 +2,8 @@
 """
 Remap competition submission IDs from legacy composite keys to Parquet ``id`` values.
 
-Older generate_submission runs used make_parquet_record_key() (e.g.
+Older generate_submission runs (before the Kaggle ``id`` fix in whisper_dataset.py) used
+make_parquet_record_key() (e.g.
 ``recorder_uuid_test_unscripted_024_000347``) instead of the Parquet ``id`` column
 (e.g. ``bpZJK6vvnq_18Nov2024071546GMT_1731914146936.wav``).
 

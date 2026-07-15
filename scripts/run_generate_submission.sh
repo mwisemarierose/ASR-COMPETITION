@@ -15,6 +15,7 @@ export TRANSFORMERS_CACHE="$HF_HOME"
 export TOKENIZERS_PARALLELISM=false
 export KAGGLE_TEST_ROOT="${KAGGLE_TEST_ROOT:-/project/community/rmwisene/datasets/anv-test-data-nt}"
 export TEST_SOURCE="${TEST_SOURCE:-kaggle_nt}"
+export SAMPLE_SUBMISSION="${SAMPLE_SUBMISSION:-}"
 
 MODEL_DIR="${MODEL_DIR:-$WORK_DIR/whisper_runs/multilingual_job_125891/checkpoint-12500}"
 OUTPUT="${OUTPUT:-$WORK_DIR/whisper_runs/submission_checkpoint-12500.csv}"
@@ -42,10 +43,19 @@ echo "Batch:  $BATCH_SIZE"
 echo "Audio workers: $AUDIO_WORKERS"
 echo "Dtype:  $INFER_DTYPE"
 echo "Test:   $TEST_SOURCE ($KAGGLE_TEST_ROOT)"
+if [[ -n "$SAMPLE_SUBMISSION" ]]; then
+  echo "Sample: $SAMPLE_SUBMISSION"
+fi
+
+SAMPLE_ARGS=()
+if [[ -n "$SAMPLE_SUBMISSION" ]]; then
+  SAMPLE_ARGS=(--sample-submission "$SAMPLE_SUBMISSION")
+fi
 
 python scripts/generate_submission.py \
   --test-source "$TEST_SOURCE" \
   --kaggle-test-root "$KAGGLE_TEST_ROOT" \
+  "${SAMPLE_ARGS[@]}" \
   --work-dir "$WORK_DIR" \
   --model-dir "$MODEL_DIR" \
   --output "$OUTPUT" \

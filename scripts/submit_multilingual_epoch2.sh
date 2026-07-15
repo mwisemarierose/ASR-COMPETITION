@@ -1,5 +1,5 @@
 #!/bin/bash
-# Submit epoch-2 multilingual training (language prompts).
+# Submit epoch-2 multilingual training (same settings as epoch 1, no language prompts).
 #
 # Loads epoch-1 weights from INIT_FROM; does NOT resume optimizer state.
 #
@@ -14,7 +14,7 @@
 set -euo pipefail
 
 export PHASE=epoch2
-export INIT_FROM="${INIT_FROM:-/project/community/rmwisene/pipeline_outputs/whisper_runs/multilingual_job_125891/checkpoint-12500}"
+export INIT_FROM="${INIT_FROM:-/project/community/rmwisene/pipeline_outputs/whisper_runs/multilingual_job_126124/final}"
 export BALANCE="${BALANCE:-cap}"
 export EPOCHS="${EPOCHS:-1}"
 

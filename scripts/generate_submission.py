@@ -10,7 +10,11 @@ Usage:
   python scripts/generate_submission.py \\
     --model-dir /project/.../checkpoint-12500 \\
     --output /project/.../submission_v1.csv \\
-    --kaggle-test-root /project/.../datasets/anv-test-data-nt
+    --kaggle-test-root /project/.../datasets/anv-test-data-nt \\
+    --sample-submission /path/to/sample_submission.csv
+
+Output format matches sample_submission.csv: id, language, transcription
+(e.g. bpZJK6vvnq_18Nov2024071546GMT_1731914146936.wav, kik, ...).
 """
 from __future__ import annotations
 
@@ -33,9 +37,11 @@ from src.config import DOMAINS, SAMPLE_RATE  # noqa: E402
 from src.whisper_dataset import (  # noqa: E402
     COMPETITION_ANV_LANGUAGES,
     TrainingRecord,
+    apply_kaggle_nt_submission_ids,
     collect_kaggle_nt_test_records,
     collect_records,
     load_submission_template,
+    load_submission_template_file,
     set_forced_language_prompt,
     submission_language_code,
     summarize_records,
@@ -46,6 +52,114 @@ MAX_AUDIO_SECONDS = 30.0
 GENERATION_MAX_LENGTH = 225
 # Kaggle rejects empty transcription cells as null values.
 FAILED_AUDIO_PLACEHOLDER = "."
+
+
+def submission_clip_id(record: TrainingRecord) -> str:
+    """Return the Kaggle ``id`` column value written to the submission CSV."""
+    return record.key
+
+
+def resolve_submission_template(args: argparse.Namespace) -> list[tuple[str, str]] | None:
+    """
+    Load sample_submission.csv (id, language) rows — the competition upload format.
+
+    For kaggle_nt this is required. IDs look like
+    ``bpZJK6vvnq_18Nov2024071546GMT_1731914146936.wav``; language codes are
+    ``kik``, ``swa``, etc.
+    """
+    if args.sample_submission is not None:
+        template = load_submission_template_file(args.sample_submission.resolve())
+        if template is None:
+            print(
+                f"ERROR: could not read id/language from {args.sample_submission}",
+                file=sys.stderr,
+            )
+            raise SystemExit(1)
+        return template
+
+    if args.test_source != "kaggle_nt":
+        return None
+
+    template = load_submission_template(
+        args.kaggle_test_root.resolve(),
+        id_column=args.id_column,
+        language_column=args.language_column,
+    )
+    if template is None:
+        print(
+            "ERROR: sample_submission.csv not found.\n"
+            "  Download it from the Kaggle competition page, or place it under\n"
+            f"  {args.kaggle_test_root.resolve()}/sample_submission.csv\n"
+            "  Or pass: --sample-submission /path/to/sample_submission.csv",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
+    return template
+
+
+def validate_template_coverage(
+    template: list[tuple[str, str]],
+    records: list[TrainingRecord],
+    *,
+    id_column: str,
+) -> None:
+    """Ensure every sample_submission id has matching test audio."""
+    record_ids = {submission_clip_id(record) for record in records}
+    template_ids = [clip_id for clip_id, _language in template]
+    missing = [clip_id for clip_id in template_ids if clip_id not in record_ids]
+    if missing:
+        sample = ", ".join(missing[:3])
+        print(
+            f"ERROR: {len(missing)} sample_submission id(s) missing test audio; "
+            f"examples: {sample}",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
+
+    extra = sorted(record_ids - set(template_ids))
+    if extra:
+        sample = ", ".join(extra[:3])
+        print(
+            f"WARNING: {len(extra)} test clip(s) not in sample_submission; "
+            f"will be ignored. Examples: {sample}",
+            file=sys.stderr,
+        )
+
+    print(
+        f"Submission template: {len(template):,} rows "
+        f"({id_column} + language from sample_submission.csv)",
+        flush=True,
+    )
+
+
+def build_submission_rows_from_template(
+    template: list[tuple[str, str]],
+    predictions_by_id: dict[str, str],
+) -> list[tuple[str, str, str]]:
+    """
+    Build competition CSV rows: id, language, transcription.
+
+    Matches remap_submission_ids.py output — ids and language come from
+    sample_submission; transcriptions from inference keyed by id.
+    """
+    rows: list[tuple[str, str, str]] = []
+    missing = 0
+    for clip_id, language in template:
+        transcription = predictions_by_id.get(clip_id)
+        if transcription is None or not str(transcription).strip():
+            missing += 1
+            rows.append((clip_id, language, FAILED_AUDIO_PLACEHOLDER))
+            continue
+        text = str(transcription).strip() or FAILED_AUDIO_PLACEHOLDER
+        rows.append((clip_id, language, text))
+
+    if missing:
+        print(
+            f"WARNING: {missing} sample_submission id(s) missing predictions; "
+            f"filled with '{FAILED_AUDIO_PLACEHOLDER}'.",
+            file=sys.stderr,
+        )
+    return rows
 
 
 def parse_args() -> argparse.Namespace:
@@ -72,6 +186,16 @@ def parse_args() -> argparse.Namespace:
             )
         ),
         help="Root of digitalumuganda/anv-test-data-nt download.",
+    )
+    parser.add_argument(
+        "--sample-submission",
+        type=Path,
+        default=(
+            Path(os.environ["SAMPLE_SUBMISSION"])
+            if os.environ.get("SAMPLE_SUBMISSION")
+            else None
+        ),
+        help="Path to sample_submission.csv from Kaggle (defines id, language, row order).",
     )
     parser.add_argument(
         "--model-dir",
@@ -197,10 +321,17 @@ def iter_transcription_batches(
     audio_executor: ThreadPoolExecutor | None,
     device: torch.device,
     autocast_dtype: torch.dtype | None,
+    id_to_language: dict[str, str] | None = None,
 ) -> Iterator[list[tuple[str, str, str]]]:
     """Yield submission rows batch-by-batch so callers can flush to disk immediately."""
+
+    def row_language(record: TrainingRecord) -> str:
+        clip_id = submission_clip_id(record)
+        if id_to_language is not None:
+            return id_to_language[clip_id]
+        return submission_language_code(record.language)
+
     skipped_audio = 0
-    language_code = submission_language_code(records[0].language) if records else "swa"
 
     for start in tqdm(range(0, len(records), batch_size), desc="  batches", leave=False):
         batch_records = records[start : start + batch_size]
@@ -213,9 +344,11 @@ def iter_transcription_batches(
             audio_workers,
             audio_executor=audio_executor,
         ):
+            clip_id = submission_clip_id(record)
+            language_code = row_language(record)
             if audio is None:
                 skipped_audio += 1
-                batch_rows.append((record.key, language_code, FAILED_AUDIO_PLACEHOLDER))
+                batch_rows.append((clip_id, language_code, FAILED_AUDIO_PLACEHOLDER))
                 continue
             pending.append((record, audio))
 
@@ -253,7 +386,7 @@ def iter_transcription_batches(
             )
             del batch, generated
             for (record, _), text in zip(pending, texts):
-                batch_rows.append((record.key, language_code, text.strip()))
+                batch_rows.append((submission_clip_id(record), row_language(record), text.strip()))
             del pending
 
         if batch_rows:
@@ -285,6 +418,25 @@ def append_submission_rows(
         writer.writerows(rows)
 
 
+def load_submission_transcriptions(
+    path: Path,
+    *,
+    id_column: str,
+    text_column: str,
+) -> dict[str, str]:
+    """Load partial/final CSV into id -> transcription."""
+    import csv
+
+    by_id: dict[str, str] = {}
+    with path.open(encoding="utf-8", newline="") as handle:
+        reader = csv.DictReader(handle)
+        for row in reader:
+            clip_id = str(row[id_column]).strip()
+            if clip_id:
+                by_id[clip_id] = str(row[text_column])
+    return by_id
+
+
 def load_submission_predictions(
     path: Path,
     *,
@@ -292,7 +444,7 @@ def load_submission_predictions(
     language_column: str,
     text_column: str,
 ) -> dict[str, tuple[str, str]]:
-    """Load partial/final CSV into id -> (language, transcription)."""
+    """Load partial CSV into id -> (language, transcription). Used when no template."""
     import csv
 
     by_id: dict[str, tuple[str, str]] = {}
@@ -300,27 +452,25 @@ def load_submission_predictions(
         reader = csv.DictReader(handle)
         for row in reader:
             clip_id = str(row[id_column]).strip()
-            by_id[clip_id] = (
-                str(row[language_column]).strip(),
-                str(row[text_column]),
-            )
+            if clip_id:
+                by_id[clip_id] = (
+                    str(row[language_column]).strip(),
+                    str(row[text_column]),
+                )
     return by_id
 
 
 def write_submission(
     rows: list[tuple[str, str, str]],
     output_path: Path,
-    *,
-    id_column: str,
-    language_column: str,
-    text_column: str,
 ) -> None:
+    """Write competition CSV: id, language, transcription (matches sample_submission format)."""
     output_path.parent.mkdir(parents=True, exist_ok=True)
     suffix = output_path.suffix.lower()
     if suffix == ".parquet":
         import pandas as pd
 
-        frame = pd.DataFrame(rows, columns=[id_column, language_column, text_column])
+        frame = pd.DataFrame(rows, columns=["id", "language", "transcription"])
         frame.to_parquet(output_path, index=False)
         return
     if suffix != ".csv":
@@ -330,7 +480,7 @@ def write_submission(
 
     with output_path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.writer(handle, lineterminator="\n")
-        writer.writerow([id_column, language_column, text_column])
+        writer.writerow(["id", "language", "transcription"])
         writer.writerows(rows)
 
 
@@ -385,12 +535,8 @@ def order_submission_predictions(
         )
     if by_id:
         print(
-            f"WARNING: {len(by_id)} predicted ID(s) not in sample_submission; appending at end.",
+            f"WARNING: {len(by_id)} predicted ID(s) not in sample_submission; dropping.",
             file=sys.stderr,
-        )
-        ordered.extend(
-            (clip_id, language, transcription)
-            for clip_id, (language, transcription) in sorted(by_id.items(), key=lambda item: item[0])
         )
     return ordered
 
@@ -414,6 +560,8 @@ def main() -> int:
     model_dir = args.model_dir.resolve()
     output_path = args.output.resolve()
 
+    template = resolve_submission_template(args)
+
     test_records = collect_test_records(args)
     if not test_records:
         if args.test_source == "kaggle_nt":
@@ -425,15 +573,38 @@ def main() -> int:
             print("ERROR: no test records found. Check split paths under WORK_DIR.", file=sys.stderr)
         return 1
 
+    id_to_language: dict[str, str] | None = None
+    if args.test_source == "kaggle_nt":
+        test_root = args.kaggle_test_root.resolve()
+        test_records = apply_kaggle_nt_submission_ids(test_records, test_root)
+        if template is not None:
+            validate_template_coverage(
+                template,
+                test_records,
+                id_column=args.id_column,
+            )
+            id_to_language = {clip_id: language for clip_id, language in template}
+            template_ids = {clip_id for clip_id, _language in template}
+            test_records = [
+                record for record in test_records if submission_clip_id(record) in template_ids
+            ]
+
     print(f"Test source: {args.test_source}")
     if args.test_source == "kaggle_nt":
         print(f"Kaggle test root: {args.kaggle_test_root.resolve()}")
+        if args.sample_submission is not None:
+            print(f"Sample submission: {args.sample_submission.resolve()}")
     else:
         print(f"Work dir: {work_dir}")
         print(f"Swahili split: {args.swahili_split}")
         print(f"Anv split: {args.anv_split}")
     print(f"Test clips: {len(test_records)} — {summarize_records(test_records)}")
-    if args.expected_rows and len(test_records) != args.expected_rows:
+    if template is not None and args.expected_rows and len(template) != args.expected_rows:
+        print(
+            f"WARNING: sample_submission has {len(template)} rows; expected {args.expected_rows}.",
+            file=sys.stderr,
+        )
+    elif args.expected_rows and len(test_records) != args.expected_rows and template is None:
         print(
             f"WARNING: expected {args.expected_rows} rows, found {len(test_records)}. "
             "Submission may be rejected by the competition site.",
@@ -505,6 +676,7 @@ def main() -> int:
                 processor,
                 subset,
                 audio_executor=audio_executor if args.audio_workers > 1 else None,
+                id_to_language=id_to_language,
                 **transcribe_kwargs,
             ):
                 append_submission_rows(
@@ -516,24 +688,25 @@ def main() -> int:
                 write_header = False
                 row_count += len(batch_rows)
 
-    template = None
-    if args.test_source == "kaggle_nt":
-        template = load_submission_template(args.kaggle_test_root.resolve(), id_column=args.id_column)
-        if template:
-            print(f"Ordering rows to match sample_submission ({len(template)} IDs)")
-
     print(f"Finalizing submission from {row_count} streamed row(s)", flush=True)
-    by_id = load_submission_predictions(partial_path, **column_kwargs)
-    submission_rows = order_submission_predictions(by_id, template=template)
-    del by_id
-    write_submission(
-        submission_rows,
-        output_path,
-        **column_kwargs,
+    predictions_by_id = load_submission_transcriptions(
+        partial_path,
+        id_column=args.id_column,
+        text_column=args.text_column,
     )
+    if template is not None:
+        submission_rows = build_submission_rows_from_template(template, predictions_by_id)
+    else:
+        by_id = load_submission_predictions(partial_path, **column_kwargs)
+        submission_rows = order_submission_predictions(by_id, template=None)
+    del predictions_by_id
+    write_submission(submission_rows, output_path)
     partial_path.unlink(missing_ok=True)
 
     print(f"Wrote {len(submission_rows)} rows to {output_path}")
+    if submission_rows:
+        sample_id, sample_lang, _ = submission_rows[0]
+        print(f"Sample row: {sample_id} ({sample_lang})")
     if args.expected_rows and len(submission_rows) != args.expected_rows:
         print(
             f"WARNING: wrote {len(submission_rows)} rows; expected {args.expected_rows}.",
