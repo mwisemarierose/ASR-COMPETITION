@@ -16,7 +16,7 @@ set -euo pipefail
 
 export PHASE=epoch1
 export EPOCHS="${EPOCHS:-1}"
-SLURM_TIME="${SLURM_TIME:-12:00:00}"
+SLURM_TIME="${SLURM_TIME:-12:00:00}"  # Orchard preempt max is 12h
 
 cd ~/ASR-COMPETITION
 mkdir -p logs
