@@ -77,7 +77,7 @@ case "$PHASE" in
     ;;
 esac
 
-# Stable output dir across SLURM requeues on the preempt partition.
+# Stable output dir across SLURM requeues (set OUTPUT_DIR explicitly when resuming).
 if [[ -z "${OUTPUT_DIR:-}" && -n "${SLURM_JOB_ID:-}" ]]; then
   if [[ "$PHASE" == "epoch2" ]]; then
     export OUTPUT_DIR="$WORK_DIR/whisper_runs/multilingual_epoch2_${SLURM_JOB_ID}"

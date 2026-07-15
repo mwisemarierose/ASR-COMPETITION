@@ -16,7 +16,8 @@ set -euo pipefail
 
 export PHASE=epoch1
 export EPOCHS="${EPOCHS:-1}"
-SLURM_TIME="${SLURM_TIME:-12:00:00}"  # Orchard preempt max is 12h
+SLURM_PARTITION="${SLURM_PARTITION:-general}"
+SLURM_TIME="${SLURM_TIME:-12:00:00}"
 
 cd ~/ASR-COMPETITION
 mkdir -p logs
@@ -24,6 +25,7 @@ chmod +x scripts/train_multilingual.sh
 
 JOBID=$(sbatch --parsable \
   --export=ALL \
+  --partition="$SLURM_PARTITION" \
   --job-name=whisper-multilingual \
   --output=logs/whisper-multilingual-%j.out \
   --error=logs/whisper-multilingual-%j.err \
@@ -36,6 +38,7 @@ JOBID=$(sbatch --parsable \
 echo "Submitted multilingual training (one model, all 6 languages)"
 echo "Phase:   ${PHASE} (whisper-small from scratch)"
 echo "Job ID:  $JOBID"
+echo "Partition: $SLURM_PARTITION (time=$SLURM_TIME)"
 echo "Balance: ${BALANCE:-cap} (MAX_PER_LANGUAGE=${MAX_PER_LANGUAGE:-80000})"
 echo "Epochs:  ${EPOCHS:-1}"
 if [[ -n "${OUTPUT_DIR:-}" ]]; then

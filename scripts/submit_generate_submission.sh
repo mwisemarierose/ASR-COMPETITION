@@ -13,6 +13,8 @@ set -euo pipefail
 
 export BATCH_SIZE="${BATCH_SIZE:-16}"
 export AUDIO_WORKERS="${AUDIO_WORKERS:-8}"
+SLURM_PARTITION="${SLURM_PARTITION:-general}"
+SLURM_TIME="${SLURM_TIME:-12:00:00}"
 SLURM_CPUS="${SLURM_CPUS:-8}"
 SLURM_MEM="${SLURM_MEM:-128G}"
 
@@ -22,10 +24,11 @@ chmod +x scripts/run_generate_submission.sh
 
 JOBID=$(sbatch --parsable \
   --export=ALL \
+  --partition="$SLURM_PARTITION" \
   --job-name=whisper-submission \
   --output=logs/whisper-submission-%j.out \
   --error=logs/whisper-submission-%j.err \
-  --time=12:00:00 \
+  --time="$SLURM_TIME" \
   --cpus-per-task="$SLURM_CPUS" \
   --mem="$SLURM_MEM" \
   --gres=gpu:1 \
@@ -33,6 +36,7 @@ JOBID=$(sbatch --parsable \
 
 echo "Submitted submission generation"
 echo "Job ID:  $JOBID"
+echo "Partition: $SLURM_PARTITION (time=$SLURM_TIME)"
 echo "CPUs:    $SLURM_CPUS (AUDIO_WORKERS=$AUDIO_WORKERS, BATCH_SIZE=$BATCH_SIZE, MEM=$SLURM_MEM)"
 echo "Model:   ${MODEL_DIR:-/project/community/rmwisene/pipeline_outputs/whisper_runs/multilingual_job_125891/checkpoint-12500}"
 echo "Output:  ${OUTPUT:-/project/community/rmwisene/pipeline_outputs/whisper_runs/submission_checkpoint-12500.csv}"

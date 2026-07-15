@@ -1,5 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=anv-pipeline
+#SBATCH --partition=general
 #SBATCH --output=logs/anv-pipeline-%j.out
 #SBATCH --error=logs/anv-pipeline-%j.err
 #SBATCH --time=48:00:00

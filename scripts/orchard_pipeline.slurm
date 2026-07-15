@@ -1,5 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=asr-pipeline
+#SBATCH --partition=general
 #SBATCH --output=logs/asr-pipeline-%j.out
 #SBATCH --error=logs/asr-pipeline-%j.err
 #SBATCH --time=24:00:00
